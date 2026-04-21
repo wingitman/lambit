@@ -1,6 +1,4 @@
-// Package project handles reading and writing the .lambit.toml project file,
-// which describes the lambda functions, test cases, and data models for a
-// project that lambit is invoked in.
+// Package project handles reading and writing the .lambit.toml project file.
 package project
 
 import (
@@ -13,21 +11,38 @@ import (
 
 const ProjectFile = ".lambit.toml"
 
-// TestCase is a named payload that can be passed to a function.
+// TestCaseKind distinguishes user-defined payload tests from auto-discovered
+// unit tests. The zero value is TestCasePayload so existing TOML files that
+// omit the field decode correctly.
+type TestCaseKind string
+
+const (
+	TestCasePayload TestCaseKind = ""      // user-defined JSON payload test (default)
+	TestCaseXUnit   TestCaseKind = "xunit" // discovered xUnit [Fact]/[Theory] method
+)
+
+// TestCase is a named invocable test entry.
+//
+// For Kind == TestCasePayload: Payload holds the JSON to send to the lambda.
+// For Kind == TestCaseXUnit:   Filter holds the dotnet test --filter string;
+//
+//	Payload holds the [InlineData] variant value (display only).
 type TestCase struct {
-	Name    string `toml:"name"`
-	Payload string `toml:"payload"`
+	Name    string       `toml:"name"`
+	Payload string       `toml:"payload,omitempty"`
+	Kind    TestCaseKind `toml:"kind,omitempty"`   // omit for payload tests
+	Filter  string       `toml:"filter,omitempty"` // dotnet test --filter value
 }
 
 // Function describes a discoverable lambda handler entry point.
 type Function struct {
 	Name        string     `toml:"name"`
-	Handler     string     `toml:"handler"`     // e.g. "MyFn::MyFn.Function::FunctionHandler"
-	Description string     `toml:"description"` // optional
+	Handler     string     `toml:"handler"`
+	Description string     `toml:"description,omitempty"`
 	Tests       []TestCase `toml:"tests"`
 }
 
-// Model is a named JSON blob that can be used as a payload template.
+// Model is a named JSON blob used as a payload template.
 type Model struct {
 	Name string `toml:"name"`
 	JSON string `toml:"json"`
@@ -35,11 +50,10 @@ type Model struct {
 
 // Project is the root struct for .lambit.toml.
 type Project struct {
-	// Path is the directory where .lambit.toml lives (not persisted).
-	Path string `toml:"-"`
+	Path string `toml:"-"` // directory containing .lambit.toml (not persisted)
 
 	Name      string     `toml:"name"`
-	Runtime   string     `toml:"runtime"` // override auto-detect, e.g. "dotnet", "nodejs"
+	Runtime   string     `toml:"runtime"`
 	APIPort   int        `toml:"api_port"`
 	Functions []Function `toml:"functions"`
 	Models    []Model    `toml:"models"`
@@ -48,14 +62,12 @@ type Project struct {
 // DefaultAPIPort is used when the project file omits api_port.
 const DefaultAPIPort = 8080
 
-// Load reads .lambit.toml from dir (or any ancestor directory).
-// Returns ErrNotFound if no project file exists anywhere in the tree.
+// Load reads .lambit.toml from dir or any ancestor directory.
 func Load(dir string) (*Project, error) {
 	path, err := findProjectFile(dir)
 	if err != nil {
 		return nil, err
 	}
-
 	p := &Project{}
 	if _, err := toml.DecodeFile(path, p); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
@@ -68,34 +80,49 @@ func Load(dir string) (*Project, error) {
 }
 
 // Save writes the project back to its .lambit.toml file.
+// xUnit test cases (Kind == TestCaseXUnit) are never written — they are
+// re-discovered on every startup.
 func Save(p *Project) error {
+	// Strip discovered tests before serialising.
+	stripped := *p
+	stripped.Functions = make([]Function, len(p.Functions))
+	for i, fn := range p.Functions {
+		fn2 := fn
+		fn2.Tests = nil
+		for _, tc := range fn.Tests {
+			if tc.Kind != TestCaseXUnit {
+				fn2.Tests = append(fn2.Tests, tc)
+			}
+		}
+		stripped.Functions[i] = fn2
+	}
 	path := filepath.Join(p.Path, ProjectFile)
-	return os.WriteFile(path, []byte(buildProjectTOML(p)), 0644)
+	return os.WriteFile(path, []byte(buildProjectTOML(&stripped)), 0644)
 }
 
-// Scaffold writes a .lambit.toml to dir (does not overwrite an existing one).
-//
-// If detected is non-empty the discovered functions are used as the initial
-// function list, giving the user a head-start over the generic placeholder.
-// Each function that has no test cases gets a default "Hello world" test added
-// so there is always something to invoke immediately.
-//
-// If detected is empty the classic hardcoded placeholder is used instead.
+// Scaffold writes a .lambit.toml to dir (does not overwrite).
 func Scaffold(dir string, detected []Function) error {
 	path := filepath.Join(dir, ProjectFile)
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("%s already exists", path)
 	}
-
 	var functions []Function
 	if len(detected) > 0 {
 		for _, fn := range detected {
-			if len(fn.Tests) == 0 {
-				fn.Tests = []TestCase{
+			fn2 := fn
+			// Strip any xUnit tests from scaffold — they'll be re-scanned.
+			fn2.Tests = nil
+			for _, tc := range fn.Tests {
+				if tc.Kind != TestCaseXUnit {
+					fn2.Tests = append(fn2.Tests, tc)
+				}
+			}
+			if len(fn2.Tests) == 0 {
+				fn2.Tests = []TestCase{
 					{Name: "Hello world", Payload: `{"input": "hello world"}`},
 				}
 			}
-			functions = append(functions, fn)
+			functions = append(functions, fn2)
 		}
 	} else {
 		functions = []Function{
@@ -109,24 +136,19 @@ func Scaffold(dir string, detected []Function) error {
 			},
 		}
 	}
-
 	p := &Project{
 		Path:      dir,
 		Name:      filepath.Base(dir),
-		Runtime:   "",
 		APIPort:   DefaultAPIPort,
 		Functions: functions,
-		Models: []Model{
-			{Name: "SamplePayload", JSON: `{"key": "value", "count": 1}`},
-		},
+		Models:    []Model{{Name: "SamplePayload", JSON: `{"key": "value", "count": 1}`}},
 	}
 	return os.WriteFile(path, []byte(buildProjectTOML(p)), 0644)
 }
 
-// ErrNotFound is returned when no project file is found.
+// ErrNotFound is returned when no project file is found in the directory tree.
 var ErrNotFound = fmt.Errorf("no %s found in this directory or any parent", ProjectFile)
 
-// findProjectFile walks up from dir looking for a .lambit.toml file.
 func findProjectFile(dir string) (string, error) {
 	cur := dir
 	for {
@@ -143,10 +165,8 @@ func findProjectFile(dir string) (string, error) {
 	return "", ErrNotFound
 }
 
-// buildProjectTOML serialises a Project to TOML text.
 func buildProjectTOML(p *Project) string {
-	out := "# lambit project file\n" +
-		"# Generated by lambit — edit freely.\n\n" +
+	out := "# lambit project file\n# Generated by lambit — edit freely.\n\n" +
 		"[project]\n" +
 		"name     = " + quote(p.Name) + "\n" +
 		"runtime  = " + quote(p.Runtime) + "  # leave empty for auto-detect\n" +
@@ -163,13 +183,11 @@ func buildProjectTOML(p *Project) string {
 			out += "payload = " + singleQuote(t.Payload) + "\n"
 		}
 	}
-
 	for _, m := range p.Models {
 		out += "\n[[models]]\n"
 		out += "name = " + quote(m.Name) + "\n"
 		out += "json = " + singleQuote(m.JSON) + "\n"
 	}
-
 	return out
 }
 

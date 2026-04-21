@@ -25,7 +25,7 @@ type Mode int
 const (
 	ModeNormal      Mode = iota
 	ModeInvoking         // subprocess running
-	ModeEdit             // text input — context-sensitive (handler / payload / model)
+	ModeEdit             // context-sensitive text input (handler / payload / model)
 	ModeNewTest          // two-step text input: name then payload
 	ModeHelp             // keybind overlay
 	ModeError            // error panel
@@ -40,8 +40,6 @@ const (
 	StepName    InputStep = iota
 	StepPayload InputStep = iota
 )
-
-// ─── List panel selection ─────────────────────────────────────────────────────
 
 // PanelSection identifies which section of the left list is active.
 type PanelSection int
@@ -58,45 +56,33 @@ type Model struct {
 	cfg  *config.Config
 	keys resolvedKeys
 
-	// Terminal dimensions
 	width  int
 	height int
 
-	// Project state
 	proj    *project.Project
 	runtime runtime.Runtime
 
-	// Left-panel cursor
 	section     PanelSection
-	fnCursor    int // index into proj.Functions
-	testCursor  int // index into current function's Tests
-	modelCursor int // index into proj.Models
+	fnCursor    int
+	testCursor  int
+	modelCursor int
 
-	// Invocation results (last N)
 	results []invocationRecord
 	bench   *bench.Bench
 
-	// Modes
 	mode     Mode
 	errorMsg string
-	buildLog string // captured build output
+	buildLog string
 
-	// Text input (context-sensitive edit / new test)
 	textInput   textinput.Model
 	inputStep   InputStep
-	pendingName string // temp storage when entering a new test name
+	pendingName string
 
-	// Benchmark visibility
 	benchVisible bool
-
-	// API server
-	apiServer *server.Server
-
-	// Status message (transient)
-	statusMsg string
+	apiServer    *server.Server
+	statusMsg    string
 }
 
-// invocationRecord captures a single invocation result for the results pane.
 type invocationRecord struct {
 	label  string
 	result runtime.InvokeResult
@@ -166,7 +152,6 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 	}
 	m.textInput = ti
 
-	// Try to load the project.
 	proj, err := project.Load(projectDir)
 	if err != nil {
 		m.mode = ModeNoProject
@@ -175,7 +160,6 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 	}
 	m.proj = proj
 
-	// Detect runtime (override wins if set in project file).
 	var rt runtime.Runtime
 	if proj.Runtime != "" {
 		rt = runtime.ByName(proj.Runtime)
@@ -185,13 +169,14 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 	}
 	m.runtime = rt
 
-	// If no functions declared, try scanning.
 	if len(proj.Functions) == 0 && rt != nil {
 		fns, _ := rt.Scan(proj.Path)
 		m.proj.Functions = fns
 	}
 
-	// Set up API server (not started yet).
+	// Merge discovered xUnit tests (in-memory only, never persisted).
+	m.mergeDiscoveredTests()
+
 	port := proj.APIPort
 	if port == 0 {
 		port = project.DefaultAPIPort
@@ -201,7 +186,26 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 	return m, nil
 }
 
-// handleAPIInvoke is the InvokeFn callback used by the API server.
+// mergeDiscoveredTests calls ScanTests on the runtime (if it implements
+// runtime.TestScanner) and prepends discovered xUnit tests to each function's
+// in-memory test list. These are never written to .lambit.toml.
+func (m *Model) mergeDiscoveredTests() {
+	scanner, ok := m.runtime.(runtime.TestScanner)
+	if !ok {
+		return
+	}
+	for i := range m.proj.Functions {
+		discovered := scanner.ScanTests(m.proj.Path, m.proj.Functions[i])
+		if len(discovered) == 0 {
+			continue
+		}
+		// Prepend discovered tests, keep user-defined tests after them.
+		existing := m.proj.Functions[i].Tests
+		m.proj.Functions[i].Tests = append(discovered, existing...)
+	}
+}
+
+// handleAPIInvoke is the callback used by the API server.
 func (m *Model) handleAPIInvoke(functionName, payload string) (string, bool) {
 	if m.runtime == nil {
 		return `{"error":"no runtime detected"}`, false
@@ -232,7 +236,7 @@ func (m *Model) functionByName(name string) *project.Function {
 
 func (m Model) Init() tea.Cmd { return nil }
 
-// ─── tea.Msg types ────────────────────────────────────────────────────────────
+// ─── Message types ────────────────────────────────────────────────────────────
 
 type invokeResultMsg struct{ record invocationRecord }
 type buildDoneMsg struct {
@@ -278,11 +282,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleScaffoldReload(msg.dir)
 
 	case tea.KeyMsg:
-		key := msg.String()
-		return m.handleKey(key)
+		return m.handleKey(msg.String())
 	}
 
-	// Forward to text input when in an editing mode.
 	if m.mode == ModeEdit || m.mode == ModeNewTest {
 		var cmd tea.Cmd
 		m.textInput, cmd = m.textInput.Update(msg)
@@ -293,19 +295,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleScaffoldReload is called after the editor exits post-scaffold.
-// It reloads the project and transitions to ModeNormal on success, or
-// ModeError if the TOML is invalid or missing.
 func (m Model) handleScaffoldReload(dir string) (tea.Model, tea.Cmd) {
 	proj, err := project.Load(dir)
 	if err != nil {
 		m.mode = ModeError
 		m.errorMsg = "Could not load .lambit.toml after scaffold:\n" + err.Error() +
-			"\n\nEdit the file and press [s] to try again, or fix it manually."
+			"\n\nFix the file and press [" + m.keys.scaffold + "] to try again."
 		return m, nil
 	}
 	m.proj = proj
 
-	// Re-detect runtime and re-scan.
 	var rt runtime.Runtime
 	if proj.Runtime != "" {
 		rt = runtime.ByName(proj.Runtime)
@@ -319,13 +318,13 @@ func (m Model) handleScaffoldReload(dir string) (tea.Model, tea.Cmd) {
 		m.proj.Functions = fns
 	}
 
-	// Re-initialise API server on (potentially new) port.
+	m.mergeDiscoveredTests()
+
 	if m.apiServer != nil {
 		m.apiServer.Stop()
 	}
 	m.apiServer = server.New(proj.APIPort, m.handleAPIInvoke)
 
-	// Reset cursor to top.
 	m.section = SectionFunctions
 	m.fnCursor = 0
 	m.testCursor = 0
@@ -337,14 +336,12 @@ func (m Model) handleScaffoldReload(dir string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
-	// ── Error: any key dismisses ──────────────────────────────────────────
 	if m.mode == ModeError {
 		m.mode = ModeNormal
 		m.errorMsg = ""
 		return m, nil
 	}
 
-	// ── No project: only scaffold and quit work ───────────────────────────
 	if m.mode == ModeNoProject {
 		switch {
 		case matchKey(key, m.keys.scaffold):
@@ -355,13 +352,11 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ── Help overlay: any key closes ─────────────────────────────────────
 	if m.mode == ModeHelp {
 		m.mode = ModeNormal
 		return m, nil
 	}
 
-	// ── Build / invoking: only ctrl+c works ───────────────────────────────
 	if m.mode == ModeBuildRunning || m.mode == ModeInvoking {
 		if key == "ctrl+c" {
 			return m, tea.Quit
@@ -369,7 +364,6 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ── Context-sensitive edit overlay ────────────────────────────────────
 	if m.mode == ModeEdit {
 		switch key {
 		case "enter":
@@ -385,7 +379,6 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ── New test form ─────────────────────────────────────────────────────
 	if m.mode == ModeNewTest {
 		switch key {
 		case "enter":
@@ -401,7 +394,6 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ── Normal mode ───────────────────────────────────────────────────────
 	switch {
 	case matchKey(key, m.keys.quit) || key == "ctrl+c":
 		if m.apiServer != nil {
@@ -432,11 +424,15 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case matchKey(key, m.keys.pageUp):
-		for i := 0; i < 5; i++ { m.moveCursorUp() }
+		for i := 0; i < 5; i++ {
+			m.moveCursorUp()
+		}
 		return m, nil
 
 	case matchKey(key, m.keys.pageDown):
-		for i := 0; i < 5; i++ { m.moveCursorDown() }
+		for i := 0; i < 5; i++ {
+			m.moveCursorDown()
+		}
 		return m, nil
 
 	case matchKey(key, m.keys.invoke):
@@ -543,12 +539,31 @@ func (m *Model) currentPayload() string {
 	return "{}"
 }
 
+// currentTestCase returns the test case at the cursor, or nil.
+func (m *Model) currentTestCase() *project.TestCase {
+	fn := m.currentFunction()
+	if fn == nil || m.section != SectionTests {
+		return nil
+	}
+	if m.testCursor >= len(fn.Tests) {
+		return nil
+	}
+	return &fn.Tests[m.testCursor]
+}
+
 // ─── Actions ──────────────────────────────────────────────────────────────────
 
 func (m Model) doInvoke() (tea.Model, tea.Cmd) {
+	// Route xUnit test cases through the test runner path.
+	if m.section == SectionTests {
+		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+			return m.doInvokeXUnit(*tc)
+		}
+	}
+
 	if m.runtime == nil {
 		m.mode = ModeError
-		m.errorMsg = "No runtime detected for this project.\nPress [" + m.keys.scaffold + "] to scaffold a .lambit.toml."
+		m.errorMsg = "No runtime detected.\nPress [" + m.keys.scaffold + "] to scaffold a .lambit.toml."
 		return m, nil
 	}
 	fn := m.currentFunction()
@@ -571,6 +586,31 @@ func (m Model) doInvoke() (tea.Model, tea.Cmd) {
 	return m, m.runInvoke()
 }
 
+// doInvokeXUnit runs a single xUnit test case via dotnet test.
+func (m Model) doInvokeXUnit(tc project.TestCase) (tea.Model, tea.Cmd) {
+	ts, ok := m.runtime.(runtime.TestScanner)
+	if !ok {
+		m.mode = ModeError
+		m.errorMsg = "This runtime does not support test invocation."
+		return m, nil
+	}
+	args := ts.InvokeTestArgs(m.proj.Path, tc)
+	if len(args) == 0 {
+		m.mode = ModeError
+		m.errorMsg = "Could not find test project for:\n" + tc.Filter
+		return m, nil
+	}
+	m.mode = ModeInvoking
+	label := tc.Name
+	projectPath := m.proj.Path
+	return m, func() tea.Msg {
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: projectPath})
+		result := ts.ParseTestResult(res.Stdout, res.Stderr, res.Duration)
+		record := invocationRecord{label: label, result: result, at: time.Now()}
+		return invokeResultMsg{record: record}
+	}
+}
+
 func (m *Model) runInvoke() tea.Cmd {
 	fn := m.currentFunction()
 	if fn == nil {
@@ -579,10 +619,8 @@ func (m *Model) runInvoke() tea.Cmd {
 	payload := m.currentPayload()
 	args := m.runtime.InvokeArgs(m.proj.Path, *fn, payload)
 	label := fn.Name
-	if m.section == SectionTests {
-		if m.testCursor < len(fn.Tests) {
-			label = fn.Tests[m.testCursor].Name
-		}
+	if m.section == SectionTests && m.testCursor < len(fn.Tests) {
+		label = fn.Tests[m.testCursor].Name
 	}
 	projectPath := m.proj.Path
 	rt := m.runtime
@@ -598,9 +636,7 @@ func (m *Model) runInvoke() tea.Cmd {
 }
 
 // openEdit opens the context-sensitive edit overlay.
-//   - SectionFunctions → edit the handler string
-//   - SectionTests     → edit the test payload
-//   - SectionModels    → edit the model JSON
+// Disabled for xUnit test cases (they are read-only source-derived entries).
 func (m Model) openEdit() (tea.Model, tea.Cmd) {
 	switch m.section {
 	case SectionFunctions:
@@ -616,6 +652,14 @@ func (m Model) openEdit() (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case SectionTests:
+		tc := m.currentTestCase()
+		if tc == nil {
+			return m, nil
+		}
+		if tc.Kind == project.TestCaseXUnit {
+			// xUnit tests are read-only — editing is not applicable.
+			return m, nil
+		}
 		fn := m.currentFunction()
 		if fn == nil {
 			return m, nil
@@ -641,12 +685,10 @@ func (m Model) openEdit() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// submitEdit saves the text input value back to the appropriate field.
 func (m Model) submitEdit() (tea.Model, tea.Cmd) {
 	val := strings.TrimSpace(m.textInput.Value())
 	m.textInput.Blur()
 	m.mode = ModeNormal
-
 	if val == "" {
 		return m, nil
 	}
@@ -659,8 +701,7 @@ func (m Model) submitEdit() (tea.Model, tea.Cmd) {
 		}
 		oldHandler := fn.Handler
 		m.proj.Functions[m.fnCursor].Handler = val
-		// Auto-update the display name if it still equals the old method segment,
-		// so it tracks the handler without overwriting a user-customised name.
+		// Auto-update display name if it still matches the old method segment.
 		oldParts := strings.Split(oldHandler, "::")
 		newParts := strings.Split(val, "::")
 		if len(oldParts) == 3 && len(newParts) == 3 {
@@ -675,7 +716,7 @@ func (m Model) submitEdit() (tea.Model, tea.Cmd) {
 		if fn == nil {
 			return m, nil
 		}
-		if m.testCursor < len(fn.Tests) {
+		if m.testCursor < len(fn.Tests) && fn.Tests[m.testCursor].Kind != project.TestCaseXUnit {
 			m.proj.Functions[m.fnCursor].Tests[m.testCursor].Payload = val
 			_ = project.Save(m.proj)
 		}
@@ -710,7 +751,6 @@ func (m Model) submitNewTest() (tea.Model, tea.Cmd) {
 		m.mode = ModeNormal
 		return m, nil
 	}
-
 	if m.inputStep == StepName {
 		m.pendingName = val
 		m.inputStep = StepPayload
@@ -719,8 +759,6 @@ func (m Model) submitNewTest() (tea.Model, tea.Cmd) {
 		m.textInput.SetValue("{}")
 		return m, textinput.Blink
 	}
-
-	// StepPayload
 	m.textInput.Blur()
 	m.mode = ModeNormal
 	fn := m.currentFunction()
@@ -742,6 +780,12 @@ func (m Model) doDelete() (tea.Model, tea.Cmd) {
 		if fn == nil || len(fn.Tests) == 0 {
 			return m, nil
 		}
+		tc := fn.Tests[m.testCursor]
+		if tc.Kind == project.TestCaseXUnit {
+			// Can't delete source-derived tests — they'll re-appear on next scan.
+			m.statusMsg = "Cannot delete auto-discovered tests"
+			return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+		}
 		tests := fn.Tests
 		if m.testCursor >= len(tests) {
 			return m, nil
@@ -751,6 +795,7 @@ func (m Model) doDelete() (tea.Model, tea.Cmd) {
 			m.testCursor--
 		}
 		_ = project.Save(m.proj)
+
 	case SectionModels:
 		if m.modelCursor >= len(m.proj.Models) {
 			return m, nil
@@ -764,13 +809,12 @@ func (m Model) doDelete() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// doScaffold writes a .lambit.toml (pre-populated via scan if possible), then
-// opens it in $EDITOR so the user can review and fix. After the editor closes,
-// scaffoldReloadMsg triggers a full project reload and transition to ModeNormal.
+// doScaffold detects runtime, scans for functions, writes .lambit.toml,
+// then opens it in $EDITOR. On editor close, scaffoldReloadMsg triggers a
+// full reload and transitions to ModeNormal (or ModeError on bad TOML).
 func (m Model) doScaffold() (tea.Model, tea.Cmd) {
 	dir := m.proj.Path
 
-	// Attempt runtime detection + scan to pre-populate the scaffold.
 	var detected []project.Function
 	rt := runtime.Detect(dir)
 	if rt != nil {
@@ -784,8 +828,6 @@ func (m Model) doScaffold() (tea.Model, tea.Cmd) {
 	}
 
 	projFilePath := filepath.Join(dir, project.ProjectFile)
-
-	// Open the new file in $EDITOR, then fire scaffoldReloadMsg when it exits.
 	return m, tea.Sequence(
 		m.openEditor(projFilePath),
 		func() tea.Msg { return scaffoldReloadMsg{dir: dir} },
@@ -810,7 +852,7 @@ func (m Model) toggleAPI() (tea.Model, tea.Cmd) {
 	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
 }
 
-// ─── Editor helper ────────────────────────────────────────────────────────────
+// ─── Editor ───────────────────────────────────────────────────────────────────
 
 func (m Model) openEditor(path string) tea.Cmd {
 	editor := m.cfg.Apps.Editor
@@ -834,11 +876,7 @@ func (m Model) openEditor(path string) tea.Cmd {
 		}
 	}
 	c := exec.Command(editor, path)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return nil // scaffoldReloadMsg is fired by the Sequence caller
-	})
+	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
 }
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 func matchKey(pressed, binding string) bool { return pressed == binding }

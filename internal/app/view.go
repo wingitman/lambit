@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/wingitman/lambit/internal/project"
 	"github.com/wingitman/lambit/internal/ui"
 )
 
@@ -17,7 +18,6 @@ func (m Model) View() string {
 	}
 
 	var b strings.Builder
-
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
 
@@ -72,16 +72,14 @@ func (m Model) renderHeader() string {
 // ─── Main layout ──────────────────────────────────────────────────────────────
 
 func (m Model) renderMain() string {
-	leftW := 28
-	if m.width < 60 {
+	leftW := 30
+	if m.width < 64 {
 		leftW = m.width / 2
 	}
-	rightW := m.width - leftW - 1 // -1 for the divider
+	rightW := m.width - leftW - 1
 
 	var b strings.Builder
 
-	// Available height: subtract header(2), rule+results(3), status(1) and
-	// optionally benchmark pane.
 	reservedLines := 5
 	if m.benchVisible {
 		reservedLines += 12
@@ -130,7 +128,6 @@ func (m Model) renderMain() string {
 	b.WriteString(ui.StyleMuted.Render(strings.Repeat("─", clamp(m.width, 1, m.width))) + "\n")
 	b.WriteString(m.renderStatusBar())
 
-	// Input overlay floats above everything else.
 	if m.mode == ModeEdit || m.mode == ModeNewTest {
 		b.WriteString(m.renderInputOverlay())
 	}
@@ -168,13 +165,21 @@ func (m Model) renderLeftPanel(width, height int) []string {
 	} else {
 		for i, t := range fn.Tests {
 			cursor := "  "
-			style := ui.StyleNormal
+			nameStyle := ui.StyleNormal
 			if m.section == SectionTests && m.testCursor == i {
 				cursor = " ▶"
-				style = ui.StyleSelected
+				nameStyle = ui.StyleSelected
 			}
-			name := truncate(t.Name, width-4)
-			lines = append(lines, cursor+" "+style.Render(name))
+
+			if t.Kind == project.TestCaseXUnit {
+				// xUnit tests: truncate a bit more to leave room for marker.
+				name := truncate(t.Name, width-6)
+				marker := ui.StyleMuted.Render(" ⊕")
+				lines = append(lines, cursor+" "+nameStyle.Render(name)+marker)
+			} else {
+				name := truncate(t.Name, width-4)
+				lines = append(lines, cursor+" "+nameStyle.Render(name))
+			}
 		}
 	}
 
@@ -217,19 +222,39 @@ func (m Model) renderRightPanel(width, height int) []string {
 	}
 	lines = append(lines, "")
 
-	// Show what the current selection is.
+	// Section-specific content.
 	switch m.section {
 	case SectionFunctions:
 		lines = append(lines, ui.StyleAccent.Render("  Handler:"))
 		for _, hl := range wrapString(fn.Handler, width-3) {
 			lines = append(lines, "  "+ui.StyleResult.Render(hl))
 		}
+
 	case SectionTests:
-		payload := m.currentPayload()
-		lines = append(lines, ui.StyleAccent.Render("  Payload:"))
-		for _, pl := range wrapString(payload, width-3) {
-			lines = append(lines, "  "+ui.StyleResult.Render(pl))
+		if m.testCursor < len(fn.Tests) {
+			tc := fn.Tests[m.testCursor]
+			if tc.Kind == project.TestCaseXUnit {
+				// xUnit test: show filter and variant (if any).
+				lines = append(lines, ui.StyleAccent.Render("  Filter:"))
+				for _, fl := range wrapString(tc.Filter, width-3) {
+					lines = append(lines, "  "+ui.StyleResult.Render(fl))
+				}
+				lines = append(lines, "")
+				if tc.Payload != "" {
+					lines = append(lines, ui.StyleAccent.Render("  Variant:"))
+					lines = append(lines, "  "+ui.StyleResult.Render(truncate(tc.Payload, width-3)))
+				} else {
+					lines = append(lines, ui.StyleMuted.Render("  (no parameters)"))
+				}
+			} else {
+				// User-defined payload test.
+				lines = append(lines, ui.StyleAccent.Render("  Payload:"))
+				for _, pl := range wrapString(m.currentPayload(), width-3) {
+					lines = append(lines, "  "+ui.StyleResult.Render(pl))
+				}
+			}
 		}
+
 	case SectionModels:
 		if m.modelCursor < len(m.proj.Models) {
 			mdl := m.proj.Models[m.modelCursor]
@@ -261,15 +286,12 @@ func (m Model) renderResults(width int) string {
 	if len(m.results) == 0 {
 		return ui.StyleMuted.Render("  (no results yet)") + "\n"
 	}
-
 	start := len(m.results) - 5
 	if start < 0 {
 		start = 0
 	}
-	recent := m.results[start:]
-
 	var b strings.Builder
-	for _, r := range recent {
+	for _, r := range m.results[start:] {
 		status := ui.StyleSuccess.Render("✓")
 		if !r.result.Success {
 			status = ui.StyleError.Render("✗")
@@ -278,10 +300,9 @@ func (m Model) renderResults(width int) string {
 		if !r.result.Success {
 			output = truncate(r.result.Error, width-30)
 		}
-		dur := formatDur(r.result.Duration)
 		label := ui.StyleMuted.Render(truncate(r.label, 16))
 		b.WriteString(fmt.Sprintf("  %s  %-*s  %6s  %s\n",
-			status, 16, label, dur, ui.StyleResult.Render(output)))
+			status, 16, label, formatDur(r.result.Duration), ui.StyleResult.Render(output)))
 	}
 	return b.String()
 }
@@ -294,7 +315,8 @@ func (m Model) renderNoProject() string {
 	b.WriteString("\n")
 	b.WriteString(ui.StyleError.Render("  No .lambit.toml found in this directory or any parent.") + "\n\n")
 	b.WriteString(ui.StyleMuted.Render("  lambit needs a .lambit.toml to know what lambda to work with.") + "\n\n")
-	b.WriteString(ui.StyleAccent.Render("  ["+k.scaffold+"]") + ui.StyleMuted.Render(" Scaffold a .lambit.toml here (auto-detects handlers)") + "\n")
+	b.WriteString(ui.StyleAccent.Render("  ["+k.scaffold+"]") +
+		ui.StyleMuted.Render(" Scaffold a .lambit.toml here (auto-detects handlers + tests)") + "\n")
 	b.WriteString(ui.StyleAccent.Render("  ["+k.quit+"]") + ui.StyleMuted.Render(" Quit") + "\n\n")
 	b.WriteString(ui.StyleMuted.Render("  See SPEC.md for details on creating a custom runtime interface.") + "\n")
 	return b.String()
@@ -311,6 +333,9 @@ func (m Model) renderInvoking() string {
 	if fn != nil {
 		name = fn.Name
 	}
+	if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+		name = tc.Name
+	}
 	return "\n" + ui.StyleAccent.Render("  Invoking "+name+"...") + "\n\n" +
 		ui.StyleMuted.Render("  Please wait.") + "\n"
 }
@@ -324,8 +349,6 @@ func (m Model) renderErrorOverlay() string {
 	return box + "\n"
 }
 
-// renderInputOverlay renders the floating text-input box.
-// The title is context-sensitive based on the current mode and section.
 func (m Model) renderInputOverlay() string {
 	var title string
 	switch m.mode {
@@ -335,10 +358,9 @@ func (m Model) renderInputOverlay() string {
 		} else {
 			title = "New Test — Enter JSON payload"
 		}
-	default: // ModeEdit
+	default:
 		title = m.editTitle()
 	}
-
 	box := ui.StyleConfirmBox.Render(
 		ui.StyleInputPrompt.Render(title) + "\n\n" +
 			m.textInput.View() + "\n\n" +
@@ -353,11 +375,11 @@ func (m Model) renderHelp() string {
 		{"[" + k.up + "/" + k.down + "]", "Navigate list"},
 		{"[" + k.invoke + "]", "Invoke selected function / test"},
 		{"[" + k.edit + "]", "Edit selected item (handler / payload / model)"},
-		{"[" + k.newTest + "]", "Create new test case"},
+		{"[" + k.newTest + "]", "Create a new test case"},
 		{"[" + k.delete + "]", "Delete selected test / model"},
 		{"[" + k.toggleAPI + "]", "Start / stop local HTTP API server"},
 		{"[" + k.benchmark + "]", "Toggle benchmark pane"},
-		{"[" + k.scaffold + "]", "Scaffold .lambit.toml (auto-detects handlers)"},
+		{"[" + k.scaffold + "]", "Scaffold .lambit.toml (auto-detects handlers + tests)"},
 		{"[" + k.options + "]", "Open config in $EDITOR"},
 		{"[" + k.help + "]", "Show this help"},
 		{"[" + k.quit + "]", "Quit"},
@@ -407,12 +429,15 @@ func (m Model) renderStatusBar() string {
 
 // ─── Context helpers ──────────────────────────────────────────────────────────
 
-// editTitle returns the title for the edit overlay based on the active section.
+// editTitle returns the overlay title for the current section/test state.
 func (m Model) editTitle() string {
 	switch m.section {
 	case SectionFunctions:
 		return "Edit Handler"
 	case SectionTests:
+		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+			return "Edit — read-only (auto-discovered)"
+		}
 		return "Edit Payload"
 	case SectionModels:
 		return "Edit Model JSON"
@@ -420,12 +445,15 @@ func (m Model) editTitle() string {
 	return "Edit"
 }
 
-// editHint returns the short label for the edit key based on the active section.
+// editHint returns the short label shown in the right panel and status bar.
 func (m Model) editHint() string {
 	switch m.section {
 	case SectionFunctions:
 		return "Edit Handler"
 	case SectionTests:
+		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+			return "(read-only)"
+		}
 		return "Edit Payload"
 	case SectionModels:
 		return "Edit Model"
