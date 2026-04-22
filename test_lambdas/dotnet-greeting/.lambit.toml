@@ -1,0 +1,94 @@
+# lambit project file for dotnet-greeting
+# Run lambit from this directory to invoke and test the greeting lambda.
+
+[project]
+name     = "dotnet-greeting"
+runtime  = ""       # auto-detected via template.yaml
+api_port = 8080
+
+# ── Handler: Greet ──────────────────────────────────────────────────────────
+[[functions]]
+name        = "Greet"
+handler     = "GreetingFunction::GreetingFunction.Function::Greet"
+description = "Returns a friendly greeting in the requested language"
+
+[[functions.tests]]
+name    = "English greeting"
+payload = '{"name": "World", "language": "en"}'
+
+[[functions.tests]]
+name    = "Spanish greeting"
+payload = '{"name": "Mundo", "language": "es"}'
+
+[[functions.tests]]
+name    = "French greeting"
+payload = '{"name": "Monde", "language": "fr"}'
+
+[[functions.tests]]
+name    = "German greeting"
+payload = '{"name": "Welt", "language": "de"}'
+
+[[functions.tests]]
+name    = "Japanese greeting"
+payload = '{"name": "世界", "language": "ja"}'
+
+[[functions.tests]]
+name    = "Unknown language falls back to English"
+payload = '{"name": "Tester", "language": "klingon"}'
+
+# ── Handler: GreetFormal ──────────────────────────────────────────────────────
+[[functions]]
+name        = "GreetFormal"
+handler     = "GreetingFunction::GreetingFunction.Function::GreetFormal"
+description = "Returns a formal English greeting regardless of language"
+
+[[functions.tests]]
+name    = "Formal greeting"
+payload = '{"name": "Dr Smith", "language": "en"}'
+
+[[functions.tests]]
+name    = "Formal ignores language param"
+payload = '{"name": "Professor Jones", "language": "fr"}'
+
+# ── Handler: Transform ────────────────────────────────────────────────────────
+[[functions]]
+name        = "Transform"
+handler     = "GreetingFunction::GreetingFunction.Function::Transform"
+description = "Transforms text: upper | lower | reverse | shout"
+
+[[functions.tests]]
+name    = "Uppercase"
+payload = '{"text": "hello lambit", "operation": "upper"}'
+
+[[functions.tests]]
+name    = "Lowercase"
+payload = '{"text": "HELLO LAMBIT", "operation": "lower"}'
+
+[[functions.tests]]
+name    = "Reverse"
+payload = '{"text": "lambit", "operation": "reverse"}'
+
+[[functions.tests]]
+name    = "Shout"
+payload = '{"text": "hello", "operation": "shout"}'
+
+[[functions.tests]]
+name    = "Empty text (error case)"
+payload = '{"text": "", "operation": "upper"}'
+
+[[functions.tests]]
+name    = "Unknown operation (error case)"
+payload = '{"text": "hello", "operation": "explode"}'
+
+# ── Data Models ───────────────────────────────────────────────────────────────
+[[models]]
+name = "GreetingRequest"
+json = '{"name": "Alice", "language": "en"}'
+
+[[models]]
+name = "TransformRequest"
+json = '{"text": "The quick brown fox", "operation": "upper"}'
+
+[[models]]
+name = "MultiLanguageUser"
+json = '{"name": "Yuki", "language": "ja"}'

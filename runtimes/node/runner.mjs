@@ -36,7 +36,7 @@ const exportPart = handlerArg.slice(lastDot + 1);
 
 // The project root is three levels up from .lambit/node-runner/runner.mjs
 const shimDir = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(shimDir, '..', '..', '..');
+const projectRoot = path.resolve(shimDir, '..', '..');
 
 // Try .mjs, .js extensions.
 const candidates = [

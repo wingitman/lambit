@@ -1,0 +1,9 @@
+{
+  "name": "node-transform",
+  "version": "1.0.0",
+  "description": "lambit test lambda — Node.js text and data transformation functions",
+  "type": "module",
+  "dependencies": {
+    "aws-lambda": "^1.0.7"
+  }
+}

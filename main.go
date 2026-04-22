@@ -36,6 +36,10 @@ func main() {
 		tea.WithMouseCellMotion(),
 	)
 
+	// Give the API server goroutine a reference to the program so it can
+	// send results into the BubbleTea event loop.
+	model.SetProgram(p)
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running lambit: %v\n", err)
 		os.Exit(1)

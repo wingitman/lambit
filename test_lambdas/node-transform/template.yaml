@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  node-transform — lambit test lambda (SAM template)
+  Exercises: multiple Node.js handlers, text transforms, maths, statistics.
+
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: nodejs20.x
+
+Resources:
+  TransformFunction:
+    Type: AWS::Serverless::Function
+    Description: Transform text with upper/lower/reverse/slugify/wordcount/titlecase
+    Properties:
+      Handler: index.transform
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /transform
+            Method: post
+
+  CalculateFunction:
+    Type: AWS::Serverless::Function
+    Description: Perform maths operations (add/subtract/multiply/divide/power/sqrt/abs/mod)
+    Properties:
+      Handler: index.calculate
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /calculate
+            Method: post
+
+  SummariseFunction:
+    Type: AWS::Serverless::Function
+    Description: Compute statistical summary of an array of numbers
+    Properties:
+      Handler: index.summarise
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /summarise
+            Method: post

@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  dotnet-greeting — lambit test lambda (SAM template)
+  Exercises: multiple handlers, language selection, text transformation.
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: dotnet10
+    CodeUri: src/GreetingFunction/
+    Environment:
+      Variables:
+        LAMBDA_ENV: local
+
+Resources:
+  GreetFunction:
+    Type: AWS::Serverless::Function
+    Description: Returns a friendly greeting in the requested language
+    Properties:
+      Handler: GreetingFunction::GreetingFunction.Function::Greet
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /greet
+            Method: post
+
+  GreetFormalFunction:
+    Type: AWS::Serverless::Function
+    Description: Returns a formal English greeting
+    Properties:
+      Handler: GreetingFunction::GreetingFunction.Function::GreetFormal
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /greet/formal
+            Method: post
+
+  TransformFunction:
+    Type: AWS::Serverless::Function
+    Description: Transforms text using upper/lower/reverse/shout operations
+    Properties:
+      Handler: GreetingFunction::GreetingFunction.Function::Transform
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /transform
+            Method: post

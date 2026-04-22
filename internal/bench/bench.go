@@ -68,11 +68,12 @@ func (b *Bench) Render(maxWidth int) string {
 		maxDur = 1
 	}
 
-	// Find the longest label for alignment.
+	// Find the longest label for alignment (capped at 20 runes).
 	labelW := 0
 	for _, e := range b.entries {
-		if len(e.Label) > labelW {
-			labelW = len(e.Label)
+		n := len([]rune(e.Label)) // rune count, not byte count
+		if n > labelW {
+			labelW = n
 		}
 	}
 	if labelW > 20 {
@@ -81,19 +82,36 @@ func (b *Bench) Render(maxWidth int) string {
 
 	var sb strings.Builder
 	for _, e := range b.entries {
+		// Scale the bar width proportionally to the max duration.
 		filled := int(float64(barWidth) * float64(e.Duration) / float64(maxDur))
 		if filled < 1 && e.Duration > 0 {
 			filled = 1
 		}
-		empty := barWidth - filled
+		if filled > barWidth {
+			filled = barWidth // clamp — floating point can exceed barWidth
+		}
+		empty := barWidth - filled // always >= 0
 
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
 
-		label := e.Label
-		if len(label) > labelW {
-			label = label[:labelW-1] + "…"
+		// Truncate by rune count so multi-byte characters don't corrupt padding.
+		runes := []rune(e.Label)
+		if len(runes) > labelW {
+			// Use ASCII "..." (3 bytes = 3 chars) so byte len == rune len.
+			if labelW > 3 {
+				runes = append(runes[:labelW-3], '.', '.', '.')
+			} else {
+				runes = runes[:labelW]
+			}
 		}
-		pad := strings.Repeat(" ", labelW-len(label))
+		label := string(runes)
+
+		// Pad to labelW runes — now safe because we truncated by rune count.
+		padN := labelW - len([]rune(label))
+		if padN < 0 {
+			padN = 0
+		}
+		pad := strings.Repeat(" ", padN)
 
 		status := "✓"
 		if !e.Success {

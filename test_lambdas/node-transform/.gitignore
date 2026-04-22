@@ -1,0 +1,4 @@
+# Node modules
+node_modules/
+
+# lambit shim build output is not needed for Node — runner.mjs is the shim

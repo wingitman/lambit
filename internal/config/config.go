@@ -26,6 +26,9 @@ type Keybinds struct {
 	Help      string `toml:"help"`
 	PageUp    string `toml:"page_up"`
 	PageDown  string `toml:"page_down"`
+	Tab       string `toml:"tab"`
+	ShiftTab  string `toml:"shift_tab"`
+	Filter    string `toml:"filter"`
 }
 
 // Apps holds default application overrides.
@@ -39,13 +42,11 @@ type Config struct {
 	Apps     Apps     `toml:"apps"`
 }
 
-// keybindEntries is the authoritative list of every keybind TOML key name
-// paired with its comment. Adding a new keybind here propagates it through
-// migration and default-filling automatically.
+// keybindEntries is the authoritative list of every keybind TOML key.
 var keybindEntries = []struct{ key, comment string }{
 	{"up", "move cursor up"},
 	{"down", "move cursor down"},
-	{"confirm", "confirm / select"},
+	{"confirm", "lock selected function and jump to its tests"},
 	{"back", "go back / cancel"},
 	{"quit", "quit lambit"},
 	{"options", "open config file in $EDITOR"},
@@ -59,6 +60,9 @@ var keybindEntries = []struct{ key, comment string }{
 	{"help", "show keybind help overlay"},
 	{"page_up", "page up"},
 	{"page_down", "page down"},
+	{"tab", "jump to next section (Functions → Tests → Models)"},
+	{"shift_tab", "jump to previous section"},
+	{"filter", "open filter / search"},
 }
 
 var appEntries = []string{"editor"}
@@ -83,17 +87,15 @@ func Default() *Config {
 			Help:      "?",
 			PageUp:    "pgup",
 			PageDown:  "pgdown",
+			Tab:       "tab",
+			ShiftTab:  "shift+tab",
+			Filter:    "/",
 		},
-		Apps: Apps{
-			Editor: "",
-		},
+		Apps: Apps{Editor: ""},
 	}
 }
 
 // ConfigDir returns the platform-appropriate config directory.
-//   - Windows: %APPDATA%\delbysoft
-//   - macOS:   ~/Library/Application Support/delbysoft
-//   - Linux:   ~/.config/delbysoft
 func ConfigDir() string {
 	base, err := os.UserConfigDir()
 	if err != nil {
@@ -157,6 +159,9 @@ func applyKeybindDefaults(cfg *Config) {
 	if cfg.Keybinds.Help == ""      { cfg.Keybinds.Help = d.Help }
 	if cfg.Keybinds.PageUp == ""    { cfg.Keybinds.PageUp = d.PageUp }
 	if cfg.Keybinds.PageDown == ""  { cfg.Keybinds.PageDown = d.PageDown }
+	if cfg.Keybinds.Tab == ""       { cfg.Keybinds.Tab = d.Tab }
+	if cfg.Keybinds.ShiftTab == ""  { cfg.Keybinds.ShiftTab = d.ShiftTab }
+	if cfg.Keybinds.Filter == ""    { cfg.Keybinds.Filter = d.Filter }
 }
 
 func needsMigration(path string) bool {
@@ -209,8 +214,8 @@ func buildTOML(cfg *Config) string {
 		}
 	}
 	out := "# lambit configuration file\n" +
-		"# Key values: use BubbleTea names like \"up\", \"down\", \"enter\", \"esc\",\n" +
-		"# or single characters like \"q\", \"i\", \"n\".\n\n" +
+		"# Key values: use BubbleTea names like \"up\", \"down\", \"enter\", \"esc\", \"tab\",\n" +
+		"# \"shift+tab\", or single characters like \"q\", \"i\", \"/\".\n\n" +
 		"[keybinds]\n"
 	for _, e := range keybindEntries {
 		val := vals[e.key]
@@ -240,6 +245,9 @@ func keybindValues(k *Keybinds) map[string]string {
 		"help":       k.Help,
 		"page_up":    k.PageUp,
 		"page_down":  k.PageDown,
+		"tab":        k.Tab,
+		"shift_tab":  k.ShiftTab,
+		"filter":     k.Filter,
 	}
 }
 

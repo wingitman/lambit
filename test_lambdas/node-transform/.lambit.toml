@@ -1,0 +1,130 @@
+# lambit project file for node-transform
+# Run lambit from this directory to invoke and test the Node.js transformation lambdas.
+
+[project]
+name     = "node-transform"
+runtime  = ""       # auto-detected via template.yaml
+api_port = 8081
+
+# ── Handler: transform ────────────────────────────────────────────────────────
+[[functions]]
+name        = "transform"
+handler     = "index.transform"
+description = "Transform text: upper | lower | reverse | slugify | wordcount | titlecase"
+
+[[functions.tests]]
+name    = "Uppercase"
+payload = '{"text": "hello lambit", "operation": "upper"}'
+
+[[functions.tests]]
+name    = "Lowercase"
+payload = '{"text": "HELLO LAMBIT", "operation": "lower"}'
+
+[[functions.tests]]
+name    = "Reverse"
+payload = '{"text": "lambit", "operation": "reverse"}'
+
+[[functions.tests]]
+name    = "Slugify URL"
+payload = '{"text": "Hello World! This is a Test.", "operation": "slugify"}'
+
+[[functions.tests]]
+name    = "Word count"
+payload = '{"text": "the quick brown fox jumps over the lazy dog", "operation": "wordcount"}'
+
+[[functions.tests]]
+name    = "Title case"
+payload = '{"text": "the quick brown fox", "operation": "titlecase"}'
+
+[[functions.tests]]
+name    = "Empty text error"
+payload = '{"text": "", "operation": "upper"}'
+
+[[functions.tests]]
+name    = "Unknown operation error"
+payload = '{"text": "hello", "operation": "explode"}'
+
+# ── Handler: calculate ────────────────────────────────────────────────────────
+[[functions]]
+name        = "calculate"
+handler     = "index.calculate"
+description = "Maths operations: add | subtract | multiply | divide | power | sqrt | abs | mod"
+
+[[functions.tests]]
+name    = "Add two numbers"
+payload = '{"a": 42, "b": 8, "operation": "add"}'
+
+[[functions.tests]]
+name    = "Multiply"
+payload = '{"a": 6, "b": 7, "operation": "multiply"}'
+
+[[functions.tests]]
+name    = "Divide"
+payload = '{"a": 100, "b": 4, "operation": "divide"}'
+
+[[functions.tests]]
+name    = "Power (square)"
+payload = '{"a": 12, "b": 2, "operation": "power"}'
+
+[[functions.tests]]
+name    = "Square root"
+payload = '{"a": 144, "operation": "sqrt"}'
+
+[[functions.tests]]
+name    = "Modulo"
+payload = '{"a": 17, "b": 5, "operation": "mod"}'
+
+[[functions.tests]]
+name    = "Division by zero error"
+payload = '{"a": 10, "b": 0, "operation": "divide"}'
+
+[[functions.tests]]
+name    = "Sqrt of negative error"
+payload = '{"a": -1, "operation": "sqrt"}'
+
+# ── Handler: summarise ────────────────────────────────────────────────────────
+[[functions]]
+name        = "summarise"
+handler     = "index.summarise"
+description = "Statistical summary: count, sum, min, max, mean, median, mode, range"
+
+[[functions.tests]]
+name    = "Simple list"
+payload = '{"numbers": [1, 2, 3, 4, 5]}'
+
+[[functions.tests]]
+name    = "Larger dataset"
+payload = '{"numbers": [4, 8, 15, 16, 23, 42, 4, 8, 15]}'
+
+[[functions.tests]]
+name    = "All same values"
+payload = '{"numbers": [7, 7, 7, 7]}'
+
+[[functions.tests]]
+name    = "Single value"
+payload = '{"numbers": [99]}'
+
+[[functions.tests]]
+name    = "Negative numbers"
+payload = '{"numbers": [-5, -3, -1, 0, 1, 3, 5]}'
+
+[[functions.tests]]
+name    = "Empty array error"
+payload = '{"numbers": []}'
+
+# ── Data Models ───────────────────────────────────────────────────────────────
+[[models]]
+name = "TextPayload"
+json = '{"text": "The quick brown fox jumps over the lazy dog", "operation": "upper"}'
+
+[[models]]
+name = "MathsPayload"
+json = '{"a": 42, "b": 7, "operation": "multiply"}'
+
+[[models]]
+name = "StatsDataset"
+json = '{"numbers": [12, 45, 67, 23, 89, 45, 12, 67, 34, 56]}'
+
+[[models]]
+name = "LargeTextSample"
+json = '{"text": "lambit makes invoking aws lambda functions locally effortless", "operation": "titlecase"}'

@@ -1,0 +1,12 @@
+# Build outputs
+src/*/bin/
+src/*/obj/
+tests/*/bin/
+tests/*/obj/
+
+# lambit shim build output (the shim source is committed, not its output)
+.lambit/dotnet-runner/bin/
+.lambit/dotnet-runner/obj/
+
+# lambit published lambda output (run 'make publish' to regenerate)
+.lambit/lambda-out/
