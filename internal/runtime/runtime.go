@@ -68,6 +68,26 @@ type TestScanner interface {
 	ParseTestResult(stdout, stderr string, dur time.Duration) InvokeResult
 }
 
+// ─── SourceLocator optional interface ────────────────────────────────────────
+
+// SourceLocator is an optional capability a Runtime may implement.
+// Lambit discovers it via type assertion: rt.(SourceLocator).
+// It finds the source file and line number for a function handler or test case
+// so lambit can open the editor at that exact location.
+type SourceLocator interface {
+	// FindTestSource returns the source file and 1-based line number of the
+	// [Fact]/[Theory] attribute (or method signature) for an xUnit test case,
+	// or the .lambit.toml file and line for a payload test / function / model.
+	FindTestSource(projectRoot string, tc project.TestCase) (file string, line int, found bool)
+
+	// FindFunctionSource returns the .lambit.toml path and line number for a
+	// function handler entry.
+	FindFunctionSource(projectRoot string, fn project.Function) (file string, line int, found bool)
+
+	// FindModelSource returns the .lambit.toml path and line number for a model.
+	FindModelSource(projectRoot string, mdl project.Model) (file string, line int, found bool)
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 var registry []Runtime

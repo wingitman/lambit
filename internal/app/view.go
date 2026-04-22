@@ -72,7 +72,7 @@ func (m Model) renderHeader() string {
 // ─── Main layout ──────────────────────────────────────────────────────────────
 
 func (m Model) renderMain() string {
-	leftW := 30
+	leftW := m.computeLeftPanelWidth()
 	if m.width < 64 {
 		leftW = m.width / 2
 	}
@@ -345,6 +345,11 @@ func (m Model) renderRightPanel(width, height int) []string {
 	case SectionTests:
 		if m.testCursor < len(fn.Tests) {
 			tc := fn.Tests[m.testCursor]
+			// Always show the full test name, wrapped to the panel width.
+			for _, nl := range wrapString(tc.Name, width-3) {
+				lines = append(lines, ui.StylePrimary.Render("  "+nl))
+			}
+			lines = append(lines, "")
 			if tc.Kind == project.TestCaseXUnit {
 				lines = append(lines, ui.StyleAccent.Render("  Filter:"))
 				for _, fl := range wrapString(tc.Filter, width-3) {
@@ -378,9 +383,13 @@ func (m Model) renderRightPanel(width, height int) []string {
 
 	k := m.keys
 	editLabel := m.editHint()
+	copyLabel := m.copyHint()
 	hints := []string{
 		ui.StyleMuted.Render("[" + k.invoke + "]Invoke"),
 		ui.StyleMuted.Render("[" + k.edit + "]" + editLabel),
+		ui.StyleMuted.Render("[" + k.copy + "]" + copyLabel),
+		ui.StyleMuted.Render("[" + k.copyCurl + "]" + m.copyCurlHint()),
+		ui.StyleMuted.Render("[" + k.gotoSource + "]Source"),
 		ui.StyleMuted.Render("[" + k.newTest + "]New Test"),
 		ui.StyleMuted.Render("[" + k.delete + "]Delete"),
 	}
@@ -557,6 +566,9 @@ func (m Model) renderHelp() string {
 		{"[" + k.filter + "]", "Filter / search across all sections"},
 		{"[" + k.invoke + "]", "Invoke selected function / test"},
 		{"[" + k.edit + "]", "Edit selected item (handler / payload / model)"},
+		{"[" + k.copy + "]", "Copy name / curl command / dotnet test filter to clipboard"},
+		{"[" + k.copyCurl + "]", "Copy as curl command (uses live API endpoint when server is running)"},
+		{"[" + k.gotoSource + "]", "Open in $EDITOR at source line (xUnit: .cs file, others: .lambit.toml)"},
 		{"[" + k.newTest + "]", "Create a new test case"},
 		{"[" + k.delete + "]", "Delete selected test / model"},
 		{"[" + k.toggleAPI + "]", "Start / stop local HTTP API server"},
@@ -638,6 +650,9 @@ func (m Model) renderStatusBar() string {
 		// Actions.
 		"[" + k.invoke + "]Invoke",
 		"[" + k.edit + "]" + m.editHint(),
+		"[" + k.copy + "]" + m.copyHint(),
+		"[" + k.copyCurl + "]" + m.copyCurlHint(),
+		"[" + k.gotoSource + "]Source",
 		"[" + k.newTest + "]New",
 		"[" + k.delete + "]Del",
 		// Toggles.
@@ -685,6 +700,34 @@ func (m Model) editHint() string {
 		return "Edit Model"
 	}
 	return "Edit"
+}
+
+// copyHint returns the short label for [y] based on the active section.
+func (m Model) copyHint() string {
+	switch m.section {
+	case SectionFunctions:
+		return "Copy Name"
+	case SectionTests:
+		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+			return "Copy Filter"
+		}
+		return "Copy curl"
+	case SectionModels:
+		return "Copy JSON"
+	}
+	return "Copy"
+}
+
+// copyCurlHint returns the [Y] label based on context.
+// For xUnit tests it falls back to "Copy test cmd" since unit tests are not
+// invoked via curl — [Y] produces the dotnet test command in that case.
+func (m Model) copyCurlHint() string {
+	if m.section == SectionTests {
+		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+			return "Copy test cmd"
+		}
+	}
+	return "Copy curl"
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -28,7 +28,10 @@ type Keybinds struct {
 	PageDown  string `toml:"page_down"`
 	Tab       string `toml:"tab"`
 	ShiftTab  string `toml:"shift_tab"`
-	Filter    string `toml:"filter"`
+	Filter     string `toml:"filter"`
+	Copy       string `toml:"copy"`
+	CopyCurl   string `toml:"copy_curl"`
+	GotoSource string `toml:"goto_source"`
 }
 
 // Apps holds default application overrides.
@@ -62,7 +65,10 @@ var keybindEntries = []struct{ key, comment string }{
 	{"page_down", "page down"},
 	{"tab", "jump to next section (Functions → Tests → Models)"},
 	{"shift_tab", "jump to previous section"},
-	{"filter", "open filter / search"},
+	{"filter",      "open filter / search"},
+	{"copy",        "copy name / curl command / JSON to clipboard"},
+	{"copy_curl",   "copy as curl command (using API server when running)"},
+	{"goto_source", "open selected item in $EDITOR at its source line"},
 }
 
 var appEntries = []string{"editor"}
@@ -90,6 +96,9 @@ func Default() *Config {
 			Tab:       "tab",
 			ShiftTab:  "shift+tab",
 			Filter:    "/",
+			Copy:       "y",
+			CopyCurl:   "Y",
+			GotoSource: "g",
 		},
 		Apps: Apps{Editor: ""},
 	}
@@ -161,7 +170,10 @@ func applyKeybindDefaults(cfg *Config) {
 	if cfg.Keybinds.PageDown == ""  { cfg.Keybinds.PageDown = d.PageDown }
 	if cfg.Keybinds.Tab == ""       { cfg.Keybinds.Tab = d.Tab }
 	if cfg.Keybinds.ShiftTab == ""  { cfg.Keybinds.ShiftTab = d.ShiftTab }
-	if cfg.Keybinds.Filter == ""    { cfg.Keybinds.Filter = d.Filter }
+	if cfg.Keybinds.Filter == ""      { cfg.Keybinds.Filter = d.Filter }
+	if cfg.Keybinds.Copy == ""        { cfg.Keybinds.Copy = d.Copy }
+	if cfg.Keybinds.CopyCurl == ""    { cfg.Keybinds.CopyCurl = d.CopyCurl }
+	if cfg.Keybinds.GotoSource == ""  { cfg.Keybinds.GotoSource = d.GotoSource }
 }
 
 func needsMigration(path string) bool {
@@ -247,7 +259,10 @@ func keybindValues(k *Keybinds) map[string]string {
 		"page_down":  k.PageDown,
 		"tab":        k.Tab,
 		"shift_tab":  k.ShiftTab,
-		"filter":     k.Filter,
+		"filter":      k.Filter,
+		"copy":        k.Copy,
+		"copy_curl":   k.CopyCurl,
+		"goto_source": k.GotoSource,
 	}
 }
 

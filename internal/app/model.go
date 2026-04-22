@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strconv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/wingitman/lambit/internal/invoke"
 	"github.com/wingitman/lambit/internal/project"
 	"github.com/wingitman/lambit/internal/runtime"
+	"github.com/atotto/clipboard"
 	"github.com/wingitman/lambit/internal/server"
 )
 
@@ -175,7 +177,10 @@ type resolvedKeys struct {
 	pageDown  string
 	tab       string
 	shiftTab  string
-	filter    string
+	filter      string
+	copy        string
+	copyCurl    string
+	gotoSource  string
 }
 
 func resolveKeys(k config.Keybinds) resolvedKeys {
@@ -198,7 +203,10 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		pageDown:  k.PageDown,
 		tab:       k.Tab,
 		shiftTab:  k.ShiftTab,
-		filter:    k.Filter,
+		filter:     k.Filter,
+		copy:       k.Copy,
+		copyCurl:   k.CopyCurl,
+		gotoSource: k.GotoSource,
 	}
 }
 
@@ -221,6 +229,7 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 	fi.CharLimit = 80
 
 	m := &Model{
+		shared: &apiSharedState{},
 		cfg:         cfg,
 		keys:        resolveKeys(cfg.Keybinds),
 		bench:       bench.New(),
@@ -715,6 +724,15 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 
 	case matchKey(key, m.keys.scaffold):
 		return m.doScaffold()
+
+	case matchKey(key, m.keys.copy):
+		return m.doCopy()
+
+	case matchKey(key, m.keys.copyCurl):
+		return m.doCopyCurl()
+
+	case matchKey(key, m.keys.gotoSource):
+		return m.doGotoSource()
 	}
 
 	return m, nil
@@ -1464,3 +1482,321 @@ func (m Model) openEditor(path string) tea.Cmd {
 }
 
 func matchKey(pressed, binding string) bool { return pressed == binding }
+
+// ─── Left panel width ─────────────────────────────────────────────────────────
+
+// computeLeftPanelWidth returns a dynamic left panel width based on the longest
+// item name currently visible, clamped to a sensible range.
+func (m *Model) computeLeftPanelWidth() int {
+	maxRunes := 0
+	check := func(s string) {
+		n := len([]rune(s))
+		if n > maxRunes {
+			maxRunes = n
+		}
+	}
+	for _, fn := range m.proj.Functions {
+		check(fn.Name)
+	}
+	if fn := m.selectedFunction(); fn != nil {
+		for _, t := range fn.Tests {
+			check(t.Name)
+		}
+	}
+	for _, mdl := range m.proj.Models {
+		check(mdl.Name)
+	}
+	// Add room for cursor ("▶ "), trailing marker (" ⊕"), and side padding.
+	w := maxRunes + 6
+	min := 36
+	max := m.width / 2
+	if max > 60 {
+		max = 60
+	}
+	if w < min {
+		w = min
+	}
+	if w > max {
+		w = max
+	}
+	return w
+}
+
+// ─── Copy ─────────────────────────────────────────────────────────────────────
+
+func (m Model) doCopy() (tea.Model, tea.Cmd) {
+	text := m.buildCopyText()
+	if text == "" {
+		return m, nil
+	}
+	if clipboard.Unsupported {
+		m.statusMsg = "Clipboard not available — install xclip or wl-copy"
+		return m, tea.Tick(3*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		m.statusMsg = "Copy failed: " + err.Error()
+	} else {
+		m.statusMsg = "Copied!"
+	}
+	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+}
+
+// buildCopyText returns the context-sensitive text for [y]:
+//   - Functions:            function name
+//   - xUnit tests:          dotnet test filter command
+//   - Payload tests:        curl command (against API if running, else configured port)
+//   - Models:               model JSON
+func (m *Model) buildCopyText() string {
+	switch m.section {
+	case SectionFunctions:
+		fn := m.currentFunction()
+		if fn == nil {
+			return ""
+		}
+		return fn.Name
+
+	case SectionTests:
+		fn := m.selectedFunction()
+		tc := m.currentTestCase()
+		if fn == nil || tc == nil {
+			return ""
+		}
+		if tc.Kind == project.TestCaseXUnit {
+			// xUnit: copy the dotnet test filter command.
+			ts, ok := m.runtime.(runtime.TestScanner)
+			if !ok {
+				return tc.Filter
+			}
+			args := ts.InvokeTestArgs(m.proj.Path, *tc)
+			if len(args) == 0 {
+				return tc.Filter
+			}
+			return strings.Join(args, " ")
+		}
+		// Payload test: copy a curl command.
+		return m.buildCurlCommand(fn, tc.Payload)
+
+	case SectionModels:
+		if m.modelCursor < len(m.proj.Models) {
+			return m.proj.Models[m.modelCursor].JSON
+		}
+	}
+	return ""
+}
+
+// doCopyCurl copies a curl command for the selected item regardless of type.
+// For xUnit tests it uses the test's Payload variant value (or "{}" if none).
+// When the API server is running the command targets the live endpoint.
+func (m Model) doCopyCurl() (tea.Model, tea.Cmd) {
+	text := m.buildCopyCurlText()
+	if text == "" {
+		return m, nil
+	}
+	if clipboard.Unsupported {
+		m.statusMsg = "Clipboard not available — install xclip or wl-copy"
+		return m, tea.Tick(3*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		m.statusMsg = "Copy failed: " + err.Error()
+	} else {
+		m.statusMsg = "Copied curl!"
+	}
+	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+}
+
+func (m *Model) buildCopyCurlText() string {
+	fn := m.selectedFunction()
+	if fn == nil {
+		fn = m.currentFunction()
+	}
+	if fn == nil {
+		return ""
+	}
+	tc := m.currentTestCase()
+
+	// xUnit tests are invoked via dotnet test, not via curl.
+	// Fall back to the dotnet test filter command (same as [y]).
+	if tc != nil && tc.Kind == project.TestCaseXUnit {
+		ts, ok := m.runtime.(runtime.TestScanner)
+		if !ok {
+			return tc.Filter
+		}
+		args := ts.InvokeTestArgs(m.proj.Path, *tc)
+		if len(args) == 0 {
+			return tc.Filter
+		}
+		return strings.Join(args, " ")
+	}
+
+	payload := "{}"
+	if tc != nil && tc.Payload != "" {
+		payload = tc.Payload
+	} else if m.section == SectionModels && m.modelCursor < len(m.proj.Models) {
+		payload = m.proj.Models[m.modelCursor].JSON
+	}
+	return m.buildCurlCommand(fn, payload)
+}
+
+// buildCurlCommand builds a curl invocation for fn with the given JSON payload.
+// When the API server is running it targets the live endpoint; otherwise it
+// uses the project's configured port so the command is ready to paste.
+func (m *Model) buildCurlCommand(fn *project.Function, payload string) string {
+	if payload == "" {
+		payload = "{}"
+	}
+	port := m.proj.APIPort
+	if port == 0 {
+		port = project.DefaultAPIPort
+	}
+	scheme := "http"
+	host := fmt.Sprintf("localhost:%d", port)
+	// If the API server is running, use its actual address.
+	if m.apiServer != nil && m.apiServer.Running() {
+		addr := m.apiServer.Addr() // "http://localhost:8080"
+		// Strip the scheme for display clarity, keep full URL for the command.
+		_ = scheme
+		_ = host
+		return fmt.Sprintf(
+			`curl -X POST %s/%s -H "Content-Type: application/json" -d '%s'`,
+			addr, fn.Name, payload)
+	}
+	return fmt.Sprintf(
+		`curl -X POST %s://%s/%s -H "Content-Type: application/json" -d '%s'`,
+		scheme, host, fn.Name, payload)
+}
+
+// ─── Goto source ──────────────────────────────────────────────────────────────
+
+func (m Model) doGotoSource() (tea.Model, tea.Cmd) {
+	if m.proj == nil {
+		return m, nil
+	}
+
+	file, line, found := m.resolveSourceLocation()
+	if !found || file == "" {
+		m.statusMsg = "Source location not found"
+		return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+	}
+	return m, m.openEditorAt(file, line)
+}
+
+func (m *Model) resolveSourceLocation() (file string, line int, found bool) {
+	sl, hasLocator := m.runtime.(runtime.SourceLocator)
+
+	switch m.section {
+	case SectionFunctions:
+		fn := m.currentFunction()
+		if fn == nil {
+			return "", 0, false
+		}
+		if hasLocator {
+			return sl.FindFunctionSource(m.proj.Path, *fn)
+		}
+		// Fallback: open .lambit.toml at the handler line.
+		f, l, ok := findInTOML(m.proj.Path, fn.Handler)
+		return f, l, ok
+
+	case SectionTests:
+		tc := m.currentTestCase()
+		if tc == nil {
+			return "", 0, false
+		}
+		if hasLocator {
+			return sl.FindTestSource(m.proj.Path, *tc)
+		}
+		// Fallback: open .lambit.toml at the test name line.
+		f, l, ok := findInTOML(m.proj.Path, tc.Name)
+		return f, l, ok
+
+	case SectionModels:
+		if m.modelCursor >= len(m.proj.Models) {
+			return "", 0, false
+		}
+		mdl := m.proj.Models[m.modelCursor]
+		if hasLocator {
+			return sl.FindModelSource(m.proj.Path, mdl)
+		}
+		f, l, ok := findInTOML(m.proj.Path, mdl.Name)
+		return f, l, ok
+	}
+	return "", 0, false
+}
+
+// findInTOML is a package-level helper (mirrors the one in dotnet.go but
+// accessible from model.go for runtimes that don't implement SourceLocator).
+func findInTOML(projectRoot, search string) (string, int, bool) {
+	tomlPath := filepath.Join(projectRoot, project.ProjectFile)
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return "", 0, false
+	}
+	escaped := strings.ReplaceAll(search, `"`, `\"`)
+	for i, raw := range strings.Split(string(data), "\n") {
+		l := strings.TrimRight(raw, "\r")
+		if strings.Contains(l, `"`+escaped+`"`) ||
+			strings.Contains(l, "'"+search+"'") {
+			return tomlPath, i + 1, true
+		}
+	}
+	return tomlPath, 1, false
+}
+
+// openEditorAt opens path in $EDITOR at the given 1-based line number.
+// Line-jump syntax varies by editor — we handle the most common cases.
+// Falls back to just opening the file for editors that don't support +N.
+func (m Model) openEditorAt(path string, line int) tea.Cmd {
+	editor := m.cfg.Apps.Editor
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		for _, e := range []string{"nvim", "vim", "vi", "nano", "emacs", "code", "code.cmd", "notepad++", "notepad.exe"} {
+			if _, err := exec.LookPath(e); err == nil {
+				editor = e
+				break
+			}
+		}
+	}
+	if editor == "" {
+		return func() tea.Msg {
+			return fmt.Sprintf("No editor found. Set $EDITOR or apps.editor in %s", config.ConfigPath())
+		}
+	}
+
+	var c *exec.Cmd
+	base := filepath.Base(editor)
+	// Strip .exe / .cmd suffixes for matching.
+	baseLower := strings.ToLower(strings.TrimSuffix(strings.TrimSuffix(base, ".cmd"), ".exe"))
+
+	switch baseLower {
+	case "code":
+		// VS Code: code --goto file:line  (works on Linux, macOS, Windows)
+		if line > 0 {
+			c = exec.Command(editor, "--goto", path+":"+strconv.Itoa(line))
+		} else {
+			c = exec.Command(editor, path)
+		}
+	case "notepad++":
+		// Notepad++: notepad++ -nLINE file
+		if line > 0 {
+			c = exec.Command(editor, "-n"+strconv.Itoa(line), path)
+		} else {
+			c = exec.Command(editor, path)
+		}
+	case "notepad":
+		// Notepad.exe has no line support — just open the file.
+		c = exec.Command(editor, path)
+	default:
+		// vim, nvim, vi, nano, emacs, and most Unix editors: +LINE file
+		if line > 0 {
+			c = exec.Command(editor, "+"+strconv.Itoa(line), path)
+		} else {
+			c = exec.Command(editor, path)
+		}
+	}
+
+	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
+}

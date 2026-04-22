@@ -648,3 +648,142 @@ func (d *dotnetRuntime) ParseResult(stdout, stderr string, dur time.Duration) In
 		Error:    errMsg,
 	}
 }
+
+// ─── SourceLocator implementation ────────────────────────────────────────────
+
+// FindTestSource implements runtime.SourceLocator.
+// For xUnit tests it finds the .cs file and line of the [Fact]/[Theory] attribute.
+// For payload tests it finds the .lambit.toml line containing the test name.
+func (d *dotnetRuntime) FindTestSource(projectRoot string, tc project.TestCase) (string, int, bool) {
+	if tc.Kind == project.TestCaseXUnit {
+		return d.findXUnitSource(projectRoot, tc)
+	}
+	return findInTOML(projectRoot, tc.Name)
+}
+
+// FindFunctionSource implements runtime.SourceLocator.
+// Returns the .lambit.toml path and line of the function's handler entry.
+func (d *dotnetRuntime) FindFunctionSource(projectRoot string, fn project.Function) (string, int, bool) {
+	return findInTOML(projectRoot, fn.Handler)
+}
+
+// FindModelSource implements runtime.SourceLocator.
+// Returns the .lambit.toml path and line of the model's name entry.
+func (d *dotnetRuntime) FindModelSource(projectRoot string, mdl project.Model) (string, int, bool) {
+	return findInTOML(projectRoot, mdl.Name)
+}
+
+// findXUnitSource locates the [Fact]/[Theory] attribute line for an xUnit test.
+// The Filter field is "FullyQualifiedName~Namespace.ClassName.MethodName".
+func (d *dotnetRuntime) findXUnitSource(projectRoot string, tc project.TestCase) (string, int, bool) {
+	// Extract ClassName and MethodName from the filter string.
+	// Filter format: "FullyQualifiedName~Ns.ClassName.MethodName" or "...~Ns.ClassName.MethodName(variant)"
+	filter := tc.Filter
+	tilde := strings.LastIndex(filter, "~")
+	if tilde < 0 {
+		return "", 0, false
+	}
+	qualified := filter[tilde+1:]
+	// Strip any variant suffix "(..."
+	if pi := strings.Index(qualified, "("); pi >= 0 {
+		qualified = qualified[:pi]
+	}
+	// qualified = "Namespace.ClassName.MethodName"
+	parts := strings.Split(qualified, ".")
+	if len(parts) < 2 {
+		return "", 0, false
+	}
+	methodName := parts[len(parts)-1]
+	className := parts[len(parts)-2]
+
+	for _, dir := range d.findTestProjectDirs(projectRoot) {
+		var found string
+		var foundLine int
+		walkFiles(dir, 3, func(path string, _ int) {
+			if found != "" || !strings.HasSuffix(path, ".cs") {
+				return
+			}
+			file, line, ok := findMethodInCSFile(path, className, methodName)
+			if ok {
+				found = file
+				foundLine = line
+			}
+		})
+		if found != "" {
+			return found, foundLine, true
+		}
+	}
+	return "", 0, false
+}
+
+// findMethodInCSFile scans a .cs file for a [Fact]/[Theory] attribute followed
+// by the given method in the given class. Returns the line number of the
+// attribute (so the editor opens one line above the method declaration).
+func findMethodInCSFile(path, className, methodName string) (string, int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, false
+	}
+	lines := strings.Split(string(data), "\n")
+
+	inClass := false
+	pendingAttrLine := -1
+
+	for i, raw := range lines {
+		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		lineNum := i + 1 // 1-based
+
+		// Track class entry.
+		if isClassDeclaration(line) {
+			cn := extractClassName(line)
+			inClass = strings.EqualFold(cn, className)
+			pendingAttrLine = -1
+			continue
+		}
+
+		if !inClass {
+			continue
+		}
+
+		// Record [Fact] / [Theory] attribute lines.
+		if line == "[Fact]" || strings.HasPrefix(line, "[Fact(") ||
+			line == "[Theory]" || strings.HasPrefix(line, "[Theory(") {
+			pendingAttrLine = lineNum
+			continue
+		}
+
+		// Skip other attribute lines without resetting.
+		if strings.HasPrefix(line, "[") && !isMethodSignature(line) {
+			continue
+		}
+
+		// Method signature after a pending attribute.
+		if pendingAttrLine > 0 && isMethodSignature(line) {
+			name := extractMethodName(line)
+			if strings.EqualFold(name, methodName) {
+				return path, pendingAttrLine, true
+			}
+			pendingAttrLine = -1
+		}
+	}
+	return "", 0, false
+}
+
+// findInTOML scans the .lambit.toml file in projectRoot for a line containing
+// the given search string inside a quoted value, and returns its 1-based line.
+func findInTOML(projectRoot, search string) (string, int, bool) {
+	tomlPath := filepath.Join(projectRoot, project.ProjectFile)
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return "", 0, false
+	}
+	escaped := strings.ReplaceAll(search, `"`, `\"`)
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.Contains(line, `"`+escaped+`"`) ||
+			strings.Contains(line, `'`+search+`'`) {
+			return tomlPath, i + 1, true
+		}
+	}
+	return tomlPath, 1, false // file found but line not matched — return line 1
+}
