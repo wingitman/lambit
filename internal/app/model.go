@@ -182,6 +182,7 @@ type resolvedKeys struct {
 	copy        string
 	copyCurl    string
 	gotoSource  string
+	gotoConfig  string
 }
 
 func resolveKeys(k config.Keybinds) resolvedKeys {
@@ -208,6 +209,7 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		copy:       k.Copy,
 		copyCurl:   k.CopyCurl,
 		gotoSource: k.GotoSource,
+		gotoConfig: k.GotoConfig,
 	}
 }
 
@@ -818,6 +820,9 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 
 	case matchKey(key, m.keys.gotoSource):
 		return m.doGotoSource()
+
+	case matchKey(key, m.keys.gotoConfig):
+		return m.doGotoConfig()
 	}
 
 	return m, nil
@@ -1771,12 +1776,55 @@ func (m Model) doGotoSource() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Payload tests and models live only in .lambit.toml — no source to jump to.
+	// Route them to doGotoConfig instead.
+	if m.section == SectionTests {
+		if tc := m.currentTestCase(); tc != nil && tc.Kind != project.TestCaseXUnit {
+			return m.doGotoConfig()
+		}
+	}
+	if m.section == SectionModels {
+		return m.doGotoConfig()
+	}
+
 	file, line, found := m.resolveSourceLocation()
 	if !found || file == "" {
-		m.statusMsg = "Source location not found"
-		return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+		m.statusMsg = "Source not found — use [" + m.keys.gotoConfig + "] to open .lambit.toml"
+		return m, tea.Tick(3*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
 	}
 	return m, m.openEditorAt(file, line)
+}
+
+// doGotoConfig opens .lambit.toml in $EDITOR at the entry for the selected item.
+func (m Model) doGotoConfig() (tea.Model, tea.Cmd) {
+	if m.proj == nil {
+		return m, nil
+	}
+	switch m.section {
+	case SectionFunctions:
+		fn := m.currentFunction()
+		if fn == nil {
+			return m, nil
+		}
+		f, l, _ := findInTOML(m.proj.Path, fn.Handler)
+		return m, m.openEditorAt(f, l)
+	case SectionTests:
+		tc := m.currentTestCase()
+		if tc == nil {
+			return m, nil
+		}
+		f, l, _ := findInTOML(m.proj.Path, tc.Name)
+		return m, m.openEditorAt(f, l)
+	case SectionModels:
+		if m.modelCursor >= len(m.proj.Models) {
+			return m, nil
+		}
+		mdl := m.proj.Models[m.modelCursor]
+		f, l, _ := findInTOML(m.proj.Path, mdl.Name)
+		return m, m.openEditorAt(f, l)
+	}
+	// Fallback: just open the config file.
+	return m, m.openEditor(filepath.Join(m.proj.Path, project.ProjectFile))
 }
 
 func (m *Model) resolveSourceLocation() (file string, line int, found bool) {

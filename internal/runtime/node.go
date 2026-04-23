@@ -211,3 +211,69 @@ func (n *nodeRuntime) ParseResult(stdout, stderr string, dur time.Duration) Invo
 		Error:    errMsg,
 	}
 }
+
+// ─── SourceLocator implementation ────────────────────────────────────────────
+
+// FindFunctionSource implements runtime.SourceLocator.
+// Locates the exported function definition in the handler's .js/.mjs/.ts file.
+func (n *nodeRuntime) FindFunctionSource(projectRoot string, fn project.Function) (string, int, bool) {
+	// handler format: "file.exportName"  e.g. "index.handler"
+	lastDot := strings.LastIndex(fn.Handler, ".")
+	if lastDot < 0 {
+		return "", 0, false
+	}
+	filePart := fn.Handler[:lastDot]
+	exportName := fn.Handler[lastDot+1:]
+
+	// Try common extensions in priority order.
+	for _, ext := range []string{".mjs", ".js", ".ts"} {
+		candidate := filepath.Join(projectRoot, filePart+ext)
+		if line, ok := findNodeExport(candidate, exportName); ok {
+			return candidate, line, true
+		}
+	}
+	return "", 0, false
+}
+
+// findNodeExport scans a JS/MJS/TS file for an exported function named exportName.
+// Returns the 1-based line number of the export declaration.
+func findNodeExport(path, exportName string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		lower := strings.ToLower(line)
+		name := strings.ToLower(exportName)
+		// Match patterns:
+		//   export async function handler(
+		//   export function handler(
+		//   exports.handler =
+		//   module.exports.handler =
+		//   export const handler =
+		if strings.Contains(lower, "export") {
+			if strings.Contains(lower, "function "+name+"(") ||
+				strings.Contains(lower, "function "+name+" (") ||
+				strings.Contains(lower, "const "+name+" =") ||
+				strings.Contains(lower, "const "+name+"=") ||
+				strings.Contains(lower, "exports."+name+" =") ||
+				strings.Contains(lower, "exports."+name+"=") {
+				return i + 1, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// FindTestSource implements runtime.SourceLocator.
+// Node.js tests are framework-specific; we don't scan them — return false.
+func (n *nodeRuntime) FindTestSource(_ string, _ project.TestCase) (string, int, bool) {
+	return "", 0, false
+}
+
+// FindModelSource implements runtime.SourceLocator.
+// Models live only in .lambit.toml — return false so the caller falls back.
+func (n *nodeRuntime) FindModelSource(_ string, _ project.Model) (string, int, bool) {
+	return "", 0, false
+}

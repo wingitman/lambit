@@ -32,6 +32,7 @@ type Keybinds struct {
 	Copy       string `toml:"copy"`
 	CopyCurl   string `toml:"copy_curl"`
 	GotoSource string `toml:"goto_source"`
+	GotoConfig string `toml:"goto_config"`
 }
 
 // Apps holds default application overrides.
@@ -68,7 +69,8 @@ var keybindEntries = []struct{ key, comment string }{
 	{"filter",      "open filter / search"},
 	{"copy",        "copy name / curl command / JSON to clipboard"},
 	{"copy_curl",   "copy as curl command (using API server when running)"},
-	{"goto_source", "open selected item in $EDITOR at its source line"},
+	{"goto_source", "open handler/.cs source file in $EDITOR at the method definition"},
+	{"goto_config", "open .lambit.toml in $EDITOR at the relevant entry"},
 }
 
 var appEntries = []string{"editor"}
@@ -99,6 +101,7 @@ func Default() *Config {
 			Copy:       "y",
 			CopyCurl:   "Y",
 			GotoSource: "g",
+			GotoConfig: "G",
 		},
 		Apps: Apps{Editor: ""},
 	}
@@ -174,6 +177,7 @@ func applyKeybindDefaults(cfg *Config) {
 	if cfg.Keybinds.Copy == ""        { cfg.Keybinds.Copy = d.Copy }
 	if cfg.Keybinds.CopyCurl == ""    { cfg.Keybinds.CopyCurl = d.CopyCurl }
 	if cfg.Keybinds.GotoSource == ""  { cfg.Keybinds.GotoSource = d.GotoSource }
+	if cfg.Keybinds.GotoConfig == ""  { cfg.Keybinds.GotoConfig = d.GotoConfig }
 }
 
 func needsMigration(path string) bool {
@@ -263,6 +267,7 @@ func keybindValues(k *Keybinds) map[string]string {
 		"copy":        k.Copy,
 		"copy_curl":   k.CopyCurl,
 		"goto_source": k.GotoSource,
+		"goto_config": k.GotoConfig,
 	}
 }
 

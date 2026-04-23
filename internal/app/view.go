@@ -396,7 +396,8 @@ func (m Model) renderRightPanel(width, height int) []string {
 		ui.StyleMuted.Render("[" + k.edit + "]" + editLabel),
 		ui.StyleMuted.Render("[" + k.copy + "]" + copyLabel),
 		ui.StyleMuted.Render("[" + k.copyCurl + "]" + m.copyCurlHint()),
-		ui.StyleMuted.Render("[" + k.gotoSource + "]Source"),
+		ui.StyleMuted.Render("[" + k.gotoSource + "]" + m.gotoSourceHint()),
+		ui.StyleMuted.Render("[" + k.gotoConfig + "]Open config"),
 		ui.StyleMuted.Render("[" + k.newTest + "]New Test"),
 		ui.StyleMuted.Render("[" + k.delete + "]Delete"),
 	}
@@ -577,7 +578,8 @@ func (m Model) renderHelp() string {
 		{"[" + k.edit + "]", "Edit selected item (handler / payload / model)"},
 		{"[" + k.copy + "]", "Copy name / curl command / dotnet test filter to clipboard"},
 		{"[" + k.copyCurl + "]", "Copy as curl command (uses live API endpoint when server is running)"},
-		{"[" + k.gotoSource + "]", "Open in $EDITOR at source line (xUnit: .cs file, others: .lambit.toml)"},
+		{"[" + k.gotoSource + "]", "Open source file in $EDITOR at the method/test definition"},
+		{"[" + k.gotoConfig + "]", "Open .lambit.toml in $EDITOR at the relevant entry"},
 		{"[" + k.newTest + "]", "Create a new test case"},
 		{"[" + k.delete + "]", "Delete selected test / model"},
 		{"[" + k.toggleAPI + "]", "Start / stop local HTTP API server"},
@@ -664,7 +666,8 @@ func (m Model) renderStatusBar() string {
 		"["+k.edit+"]"+m.editHint(),
 		"["+k.copy+"]"+m.copyHint(),
 		"["+k.copyCurl+"]"+m.copyCurlHint(),
-		"["+k.gotoSource+"]Source",
+		"["+k.gotoSource+"]"+m.gotoSourceHint(),
+		"["+k.gotoConfig+"]Config",
 		"["+k.newTest+"]New",
 		"["+k.delete+"]Del",
 		"["+k.toggleAPI+"]API",
@@ -735,6 +738,20 @@ func (m Model) copyHint() string {
 // command via the two-segment API path, so all contexts return "Copy curl".
 func (m Model) copyCurlHint() string {
 	return "Copy curl"
+}
+
+// gotoSourceHint returns the context-sensitive label for [g] (open source).
+func (m Model) gotoSourceHint() string {
+	switch m.section {
+	case SectionFunctions:
+		return "Open handler"
+	case SectionTests:
+		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+			return "Open test"
+		}
+		return "Open config" // payload tests live in .lambit.toml
+	}
+	return "Open config"
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -693,9 +693,83 @@ func (d *dotnetRuntime) FindTestSource(projectRoot string, tc project.TestCase) 
 }
 
 // FindFunctionSource implements runtime.SourceLocator.
-// Returns the .lambit.toml path and line of the function's handler entry.
+// Walks the project's source .cs files to find the method definition for the
+// handler (Assembly::Namespace.ClassName::MethodName). Returns the .cs file
+// path and 1-based line number of the method signature.
+// Falls back to .lambit.toml if the source cannot be located.
 func (d *dotnetRuntime) FindFunctionSource(projectRoot string, fn project.Function) (string, int, bool) {
-	return findInTOML(projectRoot, fn.Handler)
+	return d.findHandlerInCSSource(projectRoot, fn.Handler)
+}
+
+// findHandlerInCSSource locates the method definition for a dotnet handler string.
+func (d *dotnetRuntime) findHandlerInCSSource(projectRoot, handler string) (string, int, bool) {
+	parts := strings.Split(handler, "::")
+	if len(parts) != 3 {
+		return findInTOML(projectRoot, handler) // malformed — fallback
+	}
+	// parts[1] = "Namespace.ClassName", parts[2] = "MethodName"
+	nsParts := strings.Split(parts[1], ".")
+	className := nsParts[len(nsParts)-1]
+	methodName := parts[2]
+
+	// Build a set of test-project directories so we can exclude them from the search.
+	testDirs := map[string]bool{}
+	for _, dir := range d.findTestProjectDirs(projectRoot) {
+		testDirs[filepath.Clean(dir)] = true
+	}
+
+	var foundFile string
+	var foundLine int
+	walkFiles(projectRoot, 4, func(path string, _ int) {
+		if foundFile != "" || !strings.HasSuffix(path, ".cs") {
+			return
+		}
+		// Skip .cs files that live inside a known test project directory.
+		dir := filepath.Clean(filepath.Dir(path))
+		for testDir := range testDirs {
+			if dir == testDir || strings.HasPrefix(dir, testDir+string(filepath.Separator)) {
+				return
+			}
+		}
+		file, line, ok := findMethodSignatureInCSFile(path, className, methodName)
+		if ok {
+			foundFile = file
+			foundLine = line
+		}
+	})
+	if foundFile != "" {
+		return foundFile, foundLine, true
+	}
+	// Fallback: open .lambit.toml at the handler entry.
+	return findInTOML(projectRoot, handler)
+}
+
+// findMethodSignatureInCSFile scans a .cs file for a method named methodName
+// inside a class named className. Returns the line number of the method
+// signature itself (the public/private/etc. declaration line).
+func findMethodSignatureInCSFile(path, className, methodName string) (string, int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, false
+	}
+	lines := strings.Split(string(data), "\n")
+	inClass := false
+	for i, raw := range lines {
+		line := strings.TrimSpace(strings.TrimRight(raw, "\r"))
+		lineNum := i + 1
+		if isClassDeclaration(line) {
+			inClass = strings.EqualFold(extractClassName(line), className)
+			continue
+		}
+		if !inClass {
+			continue
+		}
+		// Match a method signature with the right name.
+		if isMethodSignature(line) && strings.EqualFold(extractMethodName(line), methodName) {
+			return path, lineNum, true
+		}
+	}
+	return "", 0, false
 }
 
 // FindModelSource implements runtime.SourceLocator.
