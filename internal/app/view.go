@@ -362,6 +362,13 @@ func (m Model) renderRightPanel(width, height int) []string {
 				} else {
 					lines = append(lines, ui.StyleMuted.Render("  (no parameters)"))
 				}
+				// Show the API path for invoking this test via HTTP.
+				fnForHint := m.selectedFunction()
+				if fnForHint != nil {
+					lines = append(lines, "")
+					lines = append(lines, ui.StyleAccent.Render("  API path:"))
+					lines = append(lines, ui.StyleMuted.Render("  POST /"+fnForHint.Name+"/"+truncate(tc.Name, width-10)))
+				}
 			} else {
 				lines = append(lines, ui.StyleAccent.Render("  Payload:"))
 				for _, pl := range wrapString(m.currentPayload(), width-3) {
@@ -455,7 +462,9 @@ func (m Model) renderOutputPane(width, height int) []string {
 		lines = append(lines, ui.StyleMuted.Render(fmt.Sprintf("  %d%%", pct)))
 	}
 
-	return padLines(lines, height)
+	// Do not pad — return actual content lines so the output pane doesn't
+	// render a large black void below short output.
+	return lines
 }
 
 // ─── Results pane ─────────────────────────────────────────────────────────────
@@ -641,27 +650,31 @@ func (m Model) renderStatusBar() string {
 		}
 	}
 
-	// Put the most important navigation hints first so they survive truncation.
-	hints := []string{
-		// Selection/navigation — critical, shown first.
-		"[" + k.confirm + "]Lock",
-		"[" + k.tab + "]Tab",
-		"[" + k.filter + "]Filter",
-		// Actions.
-		"[" + k.invoke + "]Invoke",
-		"[" + k.edit + "]" + m.editHint(),
-		"[" + k.copy + "]" + m.copyHint(),
-		"[" + k.copyCurl + "]" + m.copyCurlHint(),
-		"[" + k.gotoSource + "]Source",
-		"[" + k.newTest + "]New",
-		"[" + k.delete + "]Del",
-		// Toggles.
-		apiStatus,
-		"[" + k.toggleAPI + "]API",
-		"[" + k.benchmark + "]Bench",
-		"[" + k.options + "]Config",
-		"[" + k.help + "]?",
-		"[" + k.quit + "]Quit",
+	// API status is always first when running so it is never truncated away.
+	// When off, it moves to the end where truncation is acceptable.
+	var hints []string
+	if m.apiServer != nil && m.apiServer.Running() {
+		hints = append(hints, apiStatus)
+	}
+	hints = append(hints,
+		"["+k.confirm+"]Lock",
+		"["+k.tab+"]Tab",
+		"["+k.filter+"]Filter",
+		"["+k.invoke+"]Invoke",
+		"["+k.edit+"]"+m.editHint(),
+		"["+k.copy+"]"+m.copyHint(),
+		"["+k.copyCurl+"]"+m.copyCurlHint(),
+		"["+k.gotoSource+"]Source",
+		"["+k.newTest+"]New",
+		"["+k.delete+"]Del",
+		"["+k.toggleAPI+"]API",
+		"["+k.benchmark+"]Bench",
+		"["+k.options+"]Config",
+		"["+k.help+"]?",
+		"["+k.quit+"]Quit",
+	)
+	if m.apiServer == nil || !m.apiServer.Running() {
+		hints = append(hints, apiStatus)
 	}
 	row := strings.Join(hints, "  ")
 	if len(row) > m.width {
@@ -718,15 +731,9 @@ func (m Model) copyHint() string {
 	return "Copy"
 }
 
-// copyCurlHint returns the [Y] label based on context.
-// For xUnit tests it falls back to "Copy test cmd" since unit tests are not
-// invoked via curl — [Y] produces the dotnet test command in that case.
+// copyCurlHint returns the [Y] label. xUnit tests now have a real curl
+// command via the two-segment API path, so all contexts return "Copy curl".
 func (m Model) copyCurlHint() string {
-	if m.section == SectionTests {
-		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
-			return "Copy test cmd"
-		}
-	}
 	return "Copy curl"
 }
 

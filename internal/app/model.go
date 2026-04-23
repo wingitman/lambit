@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -309,6 +310,22 @@ func (m *Model) apiInvoke(functionName, payload string) (string, bool) {
 		return `{"error":"no runtime detected"}`, false
 	}
 
+	// Two-segment path: POST /FunctionName/TestCaseName
+	// Routes to xUnit test runner or payload-test invocation.
+	if idx := strings.Index(functionName, "/"); idx >= 0 {
+		fnName := functionName[:idx]
+		tcName, _ := url.PathUnescape(functionName[idx+1:])
+		fn := functionByNameIn(proj, fnName)
+		if fn == nil {
+			return fmt.Sprintf(`{"error":"function %q not found"}`, fnName), false
+		}
+		tc := testCaseByNameIn(fn, tcName)
+		if tc == nil {
+			return fmt.Sprintf(`{"error":"test case %q not found in %s"}`, tcName, fnName), false
+		}
+		return m.apiInvokeTestCase(rt, proj, fn, tc)
+	}
+
 	fn := functionByNameIn(proj, functionName)
 	if fn == nil {
 		return fmt.Sprintf(`{"error":"function %q not found"}`, functionName), false
@@ -324,19 +341,80 @@ func (m *Model) apiInvoke(functionName, payload string) (string, bool) {
 
 	// Send the result into BubbleTea silently — updates results bar and
 	// benchmark without opening the output pane or interrupting the user.
-	if prog := m.shared.prog.Load(); prog != nil {
-		record := invocationRecord{
-			label:  "[API] " + fn.Name,
-			result: result,
-			at:     time.Now(),
-		}
-		prog.Send(apiResultMsg{record: record})
-	}
+	m.apiSendResult("[API] "+fn.Name, result)
 
 	if !result.Success {
 		return result.Error, false
 	}
 	return result.Stdout, true
+}
+
+// testCaseByNameIn finds a test case by name (case-insensitive) in fn.Tests.
+func testCaseByNameIn(fn *project.Function, name string) *project.TestCase {
+	for i := range fn.Tests {
+		if strings.EqualFold(fn.Tests[i].Name, name) {
+			return &fn.Tests[i]
+		}
+	}
+	return nil
+}
+
+// apiInvokeTestCase invokes a single test case via the API server goroutine.
+// For xUnit tests it runs dotnet test --filter; for payload tests it invokes
+// the lambda shim with the test's own payload (ignoring the HTTP body).
+func (m *Model) apiInvokeTestCase(rt runtime.Runtime, proj *project.Project, fn *project.Function, tc *project.TestCase) (string, bool) {
+	var stdout, stderr string
+	var dur time.Duration
+	var success bool
+
+	if tc.Kind == project.TestCaseXUnit {
+		ts, ok := rt.(runtime.TestScanner)
+		if !ok {
+			return `{"error":"runtime does not support xUnit test invocation"}`, false
+		}
+		args := ts.InvokeTestArgs(proj.Path, *tc)
+		if len(args) == 0 {
+			return fmt.Sprintf(`{"error":"test project not found for %q"}`, tc.Filter), false
+		}
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: proj.Path})
+		result := ts.ParseTestResult(res.Stdout, res.Stderr, res.Duration)
+		stdout, stderr, dur, success = result.Stdout, result.Stderr, result.Duration, result.Success
+	} else {
+		// Payload test — invoke the lambda with the test's payload.
+		payload := tc.Payload
+		if payload == "" {
+			payload = "{}"
+		}
+		args := rt.InvokeArgs(proj.Path, *fn, payload)
+		args = injectNoBuild(args)
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: proj.Path})
+		result := rt.ParseResult(res.Stdout, res.Stderr, res.Duration)
+		stdout, stderr, dur, success = result.Stdout, result.Stderr, result.Duration, result.Success
+	}
+
+	fullResult := runtime.InvokeResult{
+		Stdout: stdout, Stderr: stderr, Duration: dur, Success: success,
+	}
+	if !success {
+		fullResult.Error = stderr
+		if fullResult.Error == "" {
+			fullResult.Error = stdout
+		}
+	}
+	m.apiSendResult("[API] "+fn.Name+"/"+tc.Name, fullResult)
+
+	if !success {
+		return fullResult.Error, false
+	}
+	return stdout, true
+}
+
+// apiSendResult fires a silent apiResultMsg into the BubbleTea event loop.
+func (m *Model) apiSendResult(label string, result runtime.InvokeResult) {
+	if prog := m.shared.prog.Load(); prog != nil {
+		record := invocationRecord{label: label, result: result, at: time.Now()}
+		prog.Send(apiResultMsg{record: record})
+	}
 }
 
 // functionByNameIn looks up a function by name (case-insensitive) or by the
@@ -414,8 +492,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case buildDoneMsg:
 		m.buildLog = msg.log
 		if msg.err != nil {
+			errMsg := "Build failed:\n" + msg.log
+			// Add a helpful hint for the common "no project file" MSBuild error.
+			if strings.Contains(msg.log, "MSB1003") || strings.Contains(msg.log, "Specify a project or solution file") {
+				errMsg += "\n\nHint: lambit could not find a .csproj for this function.\n" +
+					"Check that the handler string (Assembly::Namespace.Class::Method)\n" +
+					"matches the assembly name in your .csproj, then press [" + m.keys.invoke + "] again."
+			}
 			m.mode = ModeError
-			m.errorMsg = "Build failed:\n" + msg.log
+			m.errorMsg = errMsg
 			return m, nil
 		}
 		return m, m.runInvoke()
@@ -766,6 +851,12 @@ func (m *Model) moveCursorUp() {
 			m.modelCursor--
 		} else {
 			m.section = SectionTests
+			// Jump to the LAST test item, not the first.
+			if fn := m.selectedFunction(); fn != nil && len(fn.Tests) > 0 {
+				m.testCursor = len(fn.Tests) - 1
+			} else {
+				m.testCursor = 0
+			}
 		}
 	}
 	m.adjustListScroll()
@@ -804,6 +895,11 @@ func (m *Model) moveCursorDown() {
 	case SectionModels:
 		if m.modelCursor < len(m.proj.Models)-1 {
 			m.modelCursor++
+		} else {
+			// Wrap around to the top of the Functions list.
+			m.section = SectionFunctions
+			m.fnCursor = 0
+			m.fnLocked = false
 		}
 	}
 	m.adjustListScroll()
@@ -1168,7 +1264,18 @@ func (m Model) doInvoke() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	buildArgs := m.runtime.BuildArgs(m.proj.Path)
+	// Use function-specific build args if the runtime supports them.
+	// This avoids MSB1003 "Specify a project or solution file" when the
+	// project root has no .csproj/.sln at its top level.
+	type funcBuilder interface {
+		BuildFunctionArgs(projectRoot string, fn project.Function) []string
+	}
+	var buildArgs []string
+	if fb, ok := m.runtime.(funcBuilder); ok {
+		buildArgs = fb.BuildFunctionArgs(m.proj.Path, *fn)
+	} else {
+		buildArgs = m.runtime.BuildArgs(m.proj.Path)
+	}
 	if len(buildArgs) > 0 {
 		m.mode = ModeBuildRunning
 		projectPath := m.proj.Path
@@ -1442,16 +1549,17 @@ func (m Model) toggleAPI() (tea.Model, tea.Cmd) {
 	}
 	if m.apiServer.Running() {
 		m.apiServer.Stop()
+		// Brief confirmation — the [API: OFF] in the status bar takes over immediately.
 		m.statusMsg = "API server stopped"
-	} else {
-		if err := m.apiServer.Start(); err != nil {
-			m.mode = ModeError
-			m.errorMsg = "Could not start API server: " + err.Error()
-			return m, nil
-		}
-		m.statusMsg = "API server started at " + m.apiServer.Addr()
+		return m, tea.Tick(1*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
 	}
-	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
+	if err := m.apiServer.Start(); err != nil {
+		m.mode = ModeError
+		m.errorMsg = "Could not start API server: " + err.Error()
+		return m, nil
+	}
+	// No transient statusMsg — the permanent [API: addr] in the status bar is enough.
+	return m, nil
 }
 
 // ─── Editor ───────────────────────────────────────────────────────────────────
@@ -1614,18 +1722,9 @@ func (m *Model) buildCopyCurlText() string {
 	}
 	tc := m.currentTestCase()
 
-	// xUnit tests are invoked via dotnet test, not via curl.
-	// Fall back to the dotnet test filter command (same as [y]).
+	// xUnit tests are now invocable via the two-segment API path /Fn/Test.
 	if tc != nil && tc.Kind == project.TestCaseXUnit {
-		ts, ok := m.runtime.(runtime.TestScanner)
-		if !ok {
-			return tc.Filter
-		}
-		args := ts.InvokeTestArgs(m.proj.Path, *tc)
-		if len(args) == 0 {
-			return tc.Filter
-		}
-		return strings.Join(args, " ")
+		return m.buildTestCurlCommand(fn, tc)
 	}
 
 	payload := "{}"
@@ -1799,4 +1898,20 @@ func (m Model) openEditorAt(path string, line int) tea.Cmd {
 	}
 
 	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
+}
+
+// buildTestCurlCommand builds a curl command that invokes a test case via the
+// two-segment API path: POST /FunctionName/TestCaseName
+// The test name is URL-path-escaped so spaces and parentheses are safe.
+func (m *Model) buildTestCurlCommand(fn *project.Function, tc *project.TestCase) string {
+	port := m.proj.APIPort
+	if port == 0 {
+		port = project.DefaultAPIPort
+	}
+	base := fmt.Sprintf("http://localhost:%d", port)
+	if m.apiServer != nil && m.apiServer.Running() {
+		base = m.apiServer.Addr()
+	}
+	testPath := url.PathEscape(tc.Name)
+	return fmt.Sprintf(`curl -X POST %s/%s/%s`, base, fn.Name, testPath)
 }

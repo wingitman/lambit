@@ -621,6 +621,36 @@ func (d *dotnetRuntime) BuildArgs(projectRoot string) []string {
 	return []string{"dotnet", "build", projectRoot, "--nologo", "-v", "q"}
 }
 
+// BuildFunctionArgs returns build args targeting the specific .csproj for fn,
+// avoiding the "MSB1003: Specify a project or solution file" error that occurs
+// when dotnet build is run against a directory with no project at its root.
+// Accessed via type assertion: rt.(interface{ BuildFunctionArgs(...) []string }).
+func (d *dotnetRuntime) BuildFunctionArgs(projectRoot string, fn project.Function) []string {
+	assembly := handlerAssemblyName(fn.Handler)
+	if assembly != "" {
+		if csproj := d.findLambdaCSProj(projectRoot, assembly); csproj != "" {
+			return []string{"dotnet", "build", csproj, "--nologo", "-v", "q"}
+		}
+	}
+	// Fallback to the generic build.
+	return d.BuildArgs(projectRoot)
+}
+
+// findLambdaCSProj walks the project tree for <assembly>.csproj (case-insensitive).
+func (d *dotnetRuntime) findLambdaCSProj(projectRoot, assembly string) string {
+	target := strings.ToLower(assembly + ".csproj")
+	found := ""
+	walkFiles(projectRoot, 4, func(path string, _ int) {
+		if found != "" {
+			return
+		}
+		if strings.ToLower(filepath.Base(path)) == target {
+			found = path
+		}
+	})
+	return found
+}
+
 func (d *dotnetRuntime) ShimDir(projectRoot string) string {
 	return filepath.Join(projectRoot, ".lambit", "dotnet-runner")
 }
@@ -628,6 +658,7 @@ func (d *dotnetRuntime) ShimDir(projectRoot string) string {
 func (d *dotnetRuntime) InvokeArgs(projectRoot string, fn project.Function, payload string) []string {
 	return []string{
 		"dotnet", "run", "--project", d.ShimDir(projectRoot),
+		"--no-build", // skip shim rebuild — the lambda was already built by BuildArgs
 		"--", fn.Handler, payload,
 	}
 }
