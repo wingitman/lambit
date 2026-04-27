@@ -25,13 +25,10 @@ var assemblyName = parts[0];
 var typeName     = parts[1];
 var methodName   = parts[2];
 
-// Resolve the lambda project root from this shim's BaseDirectory.
-// BaseDirectory = .lambit/dotnet-runner/bin/Debug/net10.0/
-// ../../../../   = .lambit/
-// ../../../../../ = <lambdaRoot>/
-var shimBin     = AppContext.BaseDirectory;
-var lambitDir   = Path.GetFullPath(Path.Combine(shimBin, "..", "..", "..", ".."));
-var projectRoot = Path.GetFullPath(Path.Combine(lambitDir, ".."));
+// The invoker (invoke.go) sets cmd.Dir to the lambda project root, so the
+// process working directory IS the project root — use it directly.
+var projectRoot = Directory.GetCurrentDirectory();
+var lambitDir   = Path.Combine(projectRoot, ".lambit");
 
 // Prefer the published output so all dependencies are available.
 var publishOut = Path.Combine(lambitDir, "lambda-out");

@@ -666,7 +666,9 @@ func (d *dotnetRuntime) InvokeArgs(projectRoot string, fn project.Function, payl
 func (d *dotnetRuntime) ParseResult(stdout, stderr string, dur time.Duration) InvokeResult {
 	stdout = strings.TrimSpace(stdout)
 	stderr = strings.TrimSpace(stderr)
-	success := stderr == "" || !strings.Contains(strings.ToLower(stderr), "error")
+	// Any output on stderr means the shim hit an error — it only writes to
+	// stderr on failure and never on a clean invocation.
+	success := stderr == ""
 	errMsg := ""
 	if !success {
 		errMsg = stderr

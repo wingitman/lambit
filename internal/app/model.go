@@ -57,6 +57,7 @@ const (
 	ModeError            // error panel
 	ModeNoProject        // no .lambit.toml found
 	ModeBuildRunning     // build subprocess running
+	ModeQuickBench       // running N consecutive invocations for benchmarking
 )
 
 type InputStep int
@@ -135,10 +136,12 @@ type Model struct {
 	filterResults []filterResult // computed on every keystroke
 	filterCursor  int            // index into filterResults (skips headers)
 
-	benchVisible bool
-	apiServer    *server.Server
-	statusMsg    string
-	apiCallCount int // number of requests handled by the API server this session
+	benchVisible       bool
+	apiServer          *server.Server
+	statusMsg          string
+	apiCallCount       int // number of requests handled by the API server this session
+	quickBenchTotal    int // total iterations requested for the current quick-bench run
+	quickBenchDone     int // iterations completed so far
 
 	// Shared state read by the HTTP server goroutine.
 	shared *apiSharedState
@@ -160,24 +163,26 @@ type invocationRecord struct {
 // ─── Resolved keybinds ────────────────────────────────────────────────────────
 
 type resolvedKeys struct {
-	up        string
-	down      string
-	confirm   string
-	back      string
-	options   string
-	quit      string
-	invoke    string
-	newTest   string
-	edit      string
-	delete    string
-	toggleAPI string
-	benchmark string
-	scaffold  string
-	help      string
-	pageUp    string
-	pageDown  string
-	tab       string
-	shiftTab  string
+	up          string
+	down        string
+	confirm     string
+	back        string
+	options     string
+	quit        string
+	invoke      string
+	invokeBuild string
+	quickBench  string
+	newTest     string
+	edit        string
+	delete      string
+	toggleAPI   string
+	benchmark   string
+	scaffold    string
+	help        string
+	pageUp      string
+	pageDown    string
+	tab         string
+	shiftTab    string
 	filter      string
 	copy        string
 	copyCurl    string
@@ -187,29 +192,31 @@ type resolvedKeys struct {
 
 func resolveKeys(k config.Keybinds) resolvedKeys {
 	return resolvedKeys{
-		up:        k.Up,
-		down:      k.Down,
-		confirm:   k.Confirm,
-		back:      k.Back,
-		options:   k.Options,
-		quit:      k.Quit,
-		invoke:    k.Invoke,
-		newTest:   k.NewTest,
-		edit:      k.Edit,
-		delete:    k.Delete,
-		toggleAPI: k.ToggleAPI,
-		benchmark: k.Benchmark,
-		scaffold:  k.Scaffold,
-		help:      k.Help,
-		pageUp:    k.PageUp,
-		pageDown:  k.PageDown,
-		tab:       k.Tab,
-		shiftTab:  k.ShiftTab,
-		filter:     k.Filter,
-		copy:       k.Copy,
-		copyCurl:   k.CopyCurl,
-		gotoSource: k.GotoSource,
-		gotoConfig: k.GotoConfig,
+		up:          k.Up,
+		down:        k.Down,
+		confirm:     k.Confirm,
+		back:        k.Back,
+		options:     k.Options,
+		quit:        k.Quit,
+		invoke:      k.Invoke,
+		invokeBuild: k.InvokeBuild,
+		quickBench:  k.QuickBench,
+		newTest:     k.NewTest,
+		edit:        k.Edit,
+		delete:      k.Delete,
+		toggleAPI:   k.ToggleAPI,
+		benchmark:   k.Benchmark,
+		scaffold:    k.Scaffold,
+		help:        k.Help,
+		pageUp:      k.PageUp,
+		pageDown:    k.PageDown,
+		tab:         k.Tab,
+		shiftTab:    k.ShiftTab,
+		filter:      k.Filter,
+		copy:        k.Copy,
+		copyCurl:    k.CopyCurl,
+		gotoSource:  k.GotoSource,
+		gotoConfig:  k.GotoConfig,
 	}
 }
 
@@ -299,6 +306,18 @@ func (m *Model) mergeDiscoveredTests() {
 	}
 }
 
+// fnRoot returns the effective filesystem root for fn. When fn.Root is set it
+// is resolved relative to proj.Path; otherwise the project root is returned.
+// All runtime calls (InvokeArgs, BuildFunctionArgs, ShimDir, FindSource, …)
+// should use fnRoot rather than proj.Path directly so that multi-lambda
+// projects with a shared .lambit.toml work correctly.
+func fnRoot(projPath string, fn *project.Function) string {
+	if fn == nil || fn.Root == "" {
+		return projPath
+	}
+	return filepath.Join(projPath, fn.Root)
+}
+
 // apiInvoke is the server.InvokeFn callback.  It runs in the HTTP server
 // goroutine, reads from shared state (safe under RLock), invokes the lambda
 // subprocess, and sends a silent apiResultMsg into the BubbleTea event loop.
@@ -335,10 +354,11 @@ func (m *Model) apiInvoke(functionName, payload string) (string, bool) {
 
 	// Inject --no-build so dotnet run does not print build diagnostics to
 	// stdout, which would contaminate the JSON response body.
-	args := rt.InvokeArgs(proj.Path, *fn, payload)
+	root := fnRoot(proj.Path, fn)
+	args := rt.InvokeArgs(root, *fn, payload)
 	args = injectNoBuild(args)
 
-	res := invoke.Run(invoke.Request{Args: args, ProjectRoot: proj.Path})
+	res := invoke.Run(invoke.Request{Args: args, ProjectRoot: root})
 	result := rt.ParseResult(res.Stdout, res.Stderr, res.Duration)
 
 	// Send the result into BubbleTea silently — updates results bar and
@@ -369,16 +389,17 @@ func (m *Model) apiInvokeTestCase(rt runtime.Runtime, proj *project.Project, fn 
 	var dur time.Duration
 	var success bool
 
+	root := fnRoot(proj.Path, fn)
 	if tc.Kind == project.TestCaseXUnit {
 		ts, ok := rt.(runtime.TestScanner)
 		if !ok {
 			return `{"error":"runtime does not support xUnit test invocation"}`, false
 		}
-		args := ts.InvokeTestArgs(proj.Path, *tc)
+		args := ts.InvokeTestArgs(root, *tc)
 		if len(args) == 0 {
 			return fmt.Sprintf(`{"error":"test project not found for %q"}`, tc.Filter), false
 		}
-		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: proj.Path})
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: root})
 		result := ts.ParseTestResult(res.Stdout, res.Stderr, res.Duration)
 		stdout, stderr, dur, success = result.Stdout, result.Stderr, result.Duration, result.Success
 	} else {
@@ -387,9 +408,9 @@ func (m *Model) apiInvokeTestCase(rt runtime.Runtime, proj *project.Project, fn 
 		if payload == "" {
 			payload = "{}"
 		}
-		args := rt.InvokeArgs(proj.Path, *fn, payload)
+		args := rt.InvokeArgs(root, *fn, payload)
 		args = injectNoBuild(args)
-		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: proj.Path})
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: root})
 		result := rt.ParseResult(res.Stdout, res.Stderr, res.Duration)
 		stdout, stderr, dur, success = result.Stdout, result.Stderr, result.Duration, result.Success
 	}
@@ -476,6 +497,7 @@ type buildDoneMsg struct {
 }
 type scaffoldReloadMsg struct{ dir string }
 type clearStatusMsg struct{}
+type quickBenchResultMsg struct{ record invocationRecord } // one iteration of a quick-bench run
 
 // ─── Update ──────────────────────────────────────────────────────────────────
 
@@ -530,6 +552,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.bench.Add(msg.record.label, msg.record.result.Duration, msg.record.result.Success)
 		m.apiCallCount++
+		return m, nil
+
+	case quickBenchResultMsg:
+		// One iteration of a quick-bench run completed. Record it silently,
+		// then fire the next iteration or finish.
+		m.results = append(m.results, msg.record)
+		if len(m.results) > 50 {
+			m.results = m.results[1:]
+		}
+		m.bench.Add(msg.record.label, msg.record.result.Duration, msg.record.result.Success)
+		m.quickBenchDone++
+		if m.quickBenchDone < m.quickBenchTotal {
+			// More iterations to go — fire the next one.
+			return m, m.runQuickBenchIteration()
+		}
+		// All iterations done — return to normal and show the benchmark pane.
+		m.mode = ModeNormal
+		m.benchVisible = true
 		return m, nil
 
 	case scaffoldReloadMsg:
@@ -626,7 +666,7 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.mode == ModeBuildRunning || m.mode == ModeInvoking {
+	if m.mode == ModeBuildRunning || m.mode == ModeInvoking || m.mode == ModeQuickBench {
 		if key == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -722,6 +762,12 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 				m.outputScroll = maxScroll
 			}
 			return m, nil
+		case matchKey(key, m.keys.invoke):
+			m.outputMode = false
+			return m.doInvokeNoBuild()
+		case matchKey(key, m.keys.invokeBuild):
+			m.outputMode = false
+			return m.doInvoke()
 		default:
 			m.outputMode = false
 		}
@@ -798,7 +844,13 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case matchKey(key, m.keys.invoke):
+		return m.doInvokeNoBuild()
+
+	case matchKey(key, m.keys.invokeBuild):
 		return m.doInvoke()
+
+	case matchKey(key, m.keys.quickBench):
+		return m.doQuickBench()
 
 	case matchKey(key, m.keys.edit):
 		return m.openEdit()
@@ -1250,6 +1302,29 @@ func (m *Model) outputLineCount() int {
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
 
+// doInvokeNoBuild invokes the selected function/test immediately without
+// triggering a build step first. Bound to the invoke keybind (default: i).
+func (m Model) doInvokeNoBuild() (tea.Model, tea.Cmd) {
+	if m.section == SectionTests {
+		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
+			return m.doInvokeXUnit(*tc)
+		}
+	}
+	if m.runtime == nil {
+		m.mode = ModeError
+		m.errorMsg = "No runtime detected.\nPress [" + m.keys.scaffold + "] to scaffold a .lambit.toml."
+		return m, nil
+	}
+	if m.selectedFunction() == nil {
+		m.mode = ModeError
+		m.errorMsg = "No function selected."
+		return m, nil
+	}
+	m.mode = ModeInvoking
+	return m, m.runInvoke()
+}
+
+// doInvoke builds the project then invokes. Bound to invoke_build (default: I).
 func (m Model) doInvoke() (tea.Model, tea.Cmd) {
 	if m.section == SectionTests {
 		if tc := m.currentTestCase(); tc != nil && tc.Kind == project.TestCaseXUnit {
@@ -1269,6 +1344,8 @@ func (m Model) doInvoke() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	root := fnRoot(m.proj.Path, fn)
+
 	// Use function-specific build args if the runtime supports them.
 	// This avoids MSB1003 "Specify a project or solution file" when the
 	// project root has no .csproj/.sln at its top level.
@@ -1277,20 +1354,70 @@ func (m Model) doInvoke() (tea.Model, tea.Cmd) {
 	}
 	var buildArgs []string
 	if fb, ok := m.runtime.(funcBuilder); ok {
-		buildArgs = fb.BuildFunctionArgs(m.proj.Path, *fn)
+		buildArgs = fb.BuildFunctionArgs(root, *fn)
 	} else {
-		buildArgs = m.runtime.BuildArgs(m.proj.Path)
+		buildArgs = m.runtime.BuildArgs(root)
 	}
 	if len(buildArgs) > 0 {
 		m.mode = ModeBuildRunning
-		projectPath := m.proj.Path
 		return m, func() tea.Msg {
-			log, err := invoke.Build(projectPath, buildArgs)
+			log, err := invoke.Build(root, buildArgs)
 			return buildDoneMsg{log: log, err: err}
 		}
 	}
 	m.mode = ModeInvoking
 	return m, m.runInvoke()
+}
+
+// doQuickBench runs the selected function bench_runs times consecutively
+// without building, collecting results into the benchmark window.
+func (m Model) doQuickBench() (tea.Model, tea.Cmd) {
+	if m.runtime == nil {
+		m.mode = ModeError
+		m.errorMsg = "No runtime detected.\nPress [" + m.keys.scaffold + "] to scaffold a .lambit.toml."
+		return m, nil
+	}
+	if m.selectedFunction() == nil {
+		m.mode = ModeError
+		m.errorMsg = "No function selected."
+		return m, nil
+	}
+
+	runs := m.proj.BenchRuns
+	if runs <= 0 {
+		runs = project.DefaultBenchRuns
+	}
+	m.quickBenchTotal = runs
+	m.quickBenchDone = 0
+	m.mode = ModeQuickBench
+	return m, m.runQuickBenchIteration()
+}
+
+// runQuickBenchIteration fires a single no-build invocation that returns a
+// quickBenchResultMsg instead of invokeResultMsg so the Update loop can chain
+// the next iteration.
+func (m *Model) runQuickBenchIteration() tea.Cmd {
+	fn := m.selectedFunction()
+	if fn == nil {
+		return nil
+	}
+	root := fnRoot(m.proj.Path, fn)
+	payload := m.currentPayload()
+	args := m.runtime.InvokeArgs(root, *fn, payload)
+	label := fn.Name
+	if m.section == SectionTests && m.testCursor < len(fn.Tests) {
+		label = fn.Tests[m.testCursor].Name
+	}
+	rt := m.runtime
+	return func() tea.Msg {
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: root})
+		record := invocationRecord{
+			label:  label,
+			result: rt.ParseResult(res.Stdout, res.Stderr, res.Duration),
+			at:     time.Now(),
+		}
+		return quickBenchResultMsg{record: record}
+	}
 }
 
 func (m Model) doInvokeXUnit(tc project.TestCase) (tea.Model, tea.Cmd) {
@@ -1300,7 +1427,8 @@ func (m Model) doInvokeXUnit(tc project.TestCase) (tea.Model, tea.Cmd) {
 		m.errorMsg = "This runtime does not support test invocation."
 		return m, nil
 	}
-	args := ts.InvokeTestArgs(m.proj.Path, tc)
+	root := fnRoot(m.proj.Path, m.selectedFunction())
+	args := ts.InvokeTestArgs(root, tc)
 	if len(args) == 0 {
 		m.mode = ModeError
 		m.errorMsg = "Could not find test project for:\n" + tc.Filter
@@ -1308,9 +1436,8 @@ func (m Model) doInvokeXUnit(tc project.TestCase) (tea.Model, tea.Cmd) {
 	}
 	m.mode = ModeInvoking
 	label := tc.Name
-	projectPath := m.proj.Path
 	return m, func() tea.Msg {
-		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: projectPath})
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: root})
 		result := ts.ParseTestResult(res.Stdout, res.Stderr, res.Duration)
 		record := invocationRecord{label: label, result: result, at: time.Now()}
 		return invokeResultMsg{record: record}
@@ -1322,16 +1449,16 @@ func (m *Model) runInvoke() tea.Cmd {
 	if fn == nil {
 		return nil
 	}
+	root := fnRoot(m.proj.Path, fn)
 	payload := m.currentPayload()
-	args := m.runtime.InvokeArgs(m.proj.Path, *fn, payload)
+	args := m.runtime.InvokeArgs(root, *fn, payload)
 	label := fn.Name
 	if m.section == SectionTests && m.testCursor < len(fn.Tests) {
 		label = fn.Tests[m.testCursor].Name
 	}
-	projectPath := m.proj.Path
 	rt := m.runtime
 	return func() tea.Msg {
-		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: projectPath})
+		res := invoke.Run(invoke.Request{Args: args, ProjectRoot: root})
 		record := invocationRecord{
 			label:  label,
 			result: rt.ParseResult(res.Stdout, res.Stderr, res.Duration),
@@ -1680,7 +1807,7 @@ func (m *Model) buildCopyText() string {
 			if !ok {
 				return tc.Filter
 			}
-			args := ts.InvokeTestArgs(m.proj.Path, *tc)
+			args := ts.InvokeTestArgs(fnRoot(m.proj.Path, fn), *tc)
 			if len(args) == 0 {
 				return tc.Filter
 			}
@@ -1837,7 +1964,7 @@ func (m *Model) resolveSourceLocation() (file string, line int, found bool) {
 			return "", 0, false
 		}
 		if hasLocator {
-			return sl.FindFunctionSource(m.proj.Path, *fn)
+			return sl.FindFunctionSource(fnRoot(m.proj.Path, fn), *fn)
 		}
 		// Fallback: open .lambit.toml at the handler line.
 		f, l, ok := findInTOML(m.proj.Path, fn.Handler)
@@ -1849,7 +1976,7 @@ func (m *Model) resolveSourceLocation() (file string, line int, found bool) {
 			return "", 0, false
 		}
 		if hasLocator {
-			return sl.FindTestSource(m.proj.Path, *tc)
+			return sl.FindTestSource(fnRoot(m.proj.Path, m.selectedFunction()), *tc)
 		}
 		// Fallback: open .lambit.toml at the test name line.
 		f, l, ok := findInTOML(m.proj.Path, tc.Name)

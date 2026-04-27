@@ -198,7 +198,9 @@ func (n *nodeRuntime) InvokeArgs(projectRoot string, fn project.Function, payloa
 func (n *nodeRuntime) ParseResult(stdout, stderr string, dur time.Duration) InvokeResult {
 	stdout = strings.TrimSpace(stdout)
 	stderr = strings.TrimSpace(stderr)
-	success := stderr == "" || !strings.Contains(strings.ToLower(stderr), "error")
+	// Any output on stderr means the runner hit an error — the shim only writes
+	// to stderr on failure paths and never during a clean invocation.
+	success := stderr == ""
 	errMsg := ""
 	if !success {
 		errMsg = stderr

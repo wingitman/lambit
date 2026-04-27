@@ -4,12 +4,13 @@ package bench
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
 
 const (
-	defaultWindowSize = 20
+	defaultWindowSize = 30
 	barWidth          = 24 // characters for the filled/empty bar
 )
 
@@ -121,7 +122,58 @@ func (b *Bench) Render(maxWidth int) string {
 		sb.WriteString(fmt.Sprintf("  %s%s  %s  %6s  %s\n",
 			label, pad, bar, formatDur(e.Duration), status))
 	}
+
+	// Summary statistics row.
+	sb.WriteString("\n")
+	sb.WriteString(b.renderStats(labelW))
+
 	return sb.String()
+}
+
+// renderStats computes and formats a summary stats line from the current window.
+func (b *Bench) renderStats(labelW int) string {
+	if len(b.entries) == 0 {
+		return ""
+	}
+
+	var total time.Duration
+	var minDur, maxDur time.Duration
+	successCount := 0
+	durations := make([]time.Duration, 0, len(b.entries))
+
+	for i, e := range b.entries {
+		if i == 0 {
+			minDur = e.Duration
+			maxDur = e.Duration
+		} else {
+			if e.Duration < minDur {
+				minDur = e.Duration
+			}
+			if e.Duration > maxDur {
+				maxDur = e.Duration
+			}
+		}
+		total += e.Duration
+		durations = append(durations, e.Duration)
+		if e.Success {
+			successCount++
+		}
+	}
+
+	avg := total / time.Duration(len(b.entries))
+
+	// p95: sort a copy and take the 95th percentile index.
+	sorted := make([]time.Duration, len(durations))
+	copy(sorted, durations)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	p95idx := int(float64(len(sorted)-1) * 0.95)
+	p95 := sorted[p95idx]
+
+	n := len(b.entries)
+	pad := strings.Repeat(" ", labelW)
+	return fmt.Sprintf("  %s  min %-8s avg %-8s p95 %-8s max %-8s  %d/%d ok\n",
+		pad, formatDur(minDur), formatDur(avg), formatDur(p95), formatDur(maxDur),
+		successCount, n)
 }
 
 func formatDur(d time.Duration) string {

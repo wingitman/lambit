@@ -33,9 +33,11 @@ var assemblyName = parts[0];
 var typeName = parts[1];
 var methodName = parts[2];
 
-// Locate the assembly — look in the project root (three levels up from shim).
-var shimDir = AppContext.BaseDirectory;
-var projectRoot = Path.GetFullPath(Path.Combine(shimDir, "..", "..", ".."));
+// The invoker (invoke.go) sets cmd.Dir to the lambda project root, so the
+// process working directory IS the project root — use it directly instead of
+// navigating from AppContext.BaseDirectory which resolves to the shim's own
+// bin/Debug/<tfm>/ directory and would give the wrong path.
+var projectRoot = Directory.GetCurrentDirectory();
 var buildOutput = Path.Combine(projectRoot, "bin", "Debug");
 
 Assembly? assembly = null;

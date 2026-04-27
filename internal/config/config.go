@@ -10,29 +10,31 @@ import (
 
 // Keybinds holds all configurable key mappings.
 type Keybinds struct {
-	Up        string `toml:"up"`
-	Down      string `toml:"down"`
-	Confirm   string `toml:"confirm"`
-	Back      string `toml:"back"`
-	Options   string `toml:"options"`
-	Quit      string `toml:"quit"`
-	Invoke    string `toml:"invoke"`
-	NewTest   string `toml:"new_test"`
-	Edit      string `toml:"edit"`
-	Delete    string `toml:"delete"`
-	ToggleAPI string `toml:"toggle_api"`
-	Benchmark string `toml:"benchmark"`
-	Scaffold  string `toml:"scaffold"`
-	Help      string `toml:"help"`
-	PageUp    string `toml:"page_up"`
-	PageDown  string `toml:"page_down"`
-	Tab       string `toml:"tab"`
-	ShiftTab  string `toml:"shift_tab"`
-	Filter     string `toml:"filter"`
-	Copy       string `toml:"copy"`
-	CopyCurl   string `toml:"copy_curl"`
-	GotoSource string `toml:"goto_source"`
-	GotoConfig string `toml:"goto_config"`
+	Up          string `toml:"up"`
+	Down        string `toml:"down"`
+	Confirm     string `toml:"confirm"`
+	Back        string `toml:"back"`
+	Options     string `toml:"options"`
+	Quit        string `toml:"quit"`
+	Invoke      string `toml:"invoke"`
+	InvokeBuild string `toml:"invoke_build"`
+	QuickBench  string `toml:"quick_bench"`
+	NewTest     string `toml:"new_test"`
+	Edit        string `toml:"edit"`
+	Delete      string `toml:"delete"`
+	ToggleAPI   string `toml:"toggle_api"`
+	Benchmark   string `toml:"benchmark"`
+	Scaffold    string `toml:"scaffold"`
+	Help        string `toml:"help"`
+	PageUp      string `toml:"page_up"`
+	PageDown    string `toml:"page_down"`
+	Tab         string `toml:"tab"`
+	ShiftTab    string `toml:"shift_tab"`
+	Filter      string `toml:"filter"`
+	Copy        string `toml:"copy"`
+	CopyCurl    string `toml:"copy_curl"`
+	GotoSource  string `toml:"goto_source"`
+	GotoConfig  string `toml:"goto_config"`
 }
 
 // Apps holds default application overrides.
@@ -54,7 +56,9 @@ var keybindEntries = []struct{ key, comment string }{
 	{"back", "go back / cancel"},
 	{"quit", "quit lambit"},
 	{"options", "open config file in $EDITOR"},
-	{"invoke", "invoke selected function / test"},
+	{"invoke", "invoke selected function / test (no build)"},
+	{"invoke_build", "build then invoke selected function / test"},
+	{"quick_bench", "run selected function N times and show benchmark stats"},
 	{"new_test", "create a new test case"},
 	{"edit", "edit selected item (handler / payload / model)"},
 	{"delete", "delete selected test case or model"},
@@ -79,29 +83,31 @@ var appEntries = []string{"editor"}
 func Default() *Config {
 	return &Config{
 		Keybinds: Keybinds{
-			Up:        "up",
-			Down:      "down",
-			Confirm:   "enter",
-			Back:      "esc",
-			Options:   "o",
-			Quit:      "q",
-			Invoke:    "i",
-			NewTest:   "n",
-			Edit:      "e",
-			Delete:    "d",
-			ToggleAPI: "a",
-			Benchmark: "b",
-			Scaffold:  "s",
-			Help:      "?",
-			PageUp:    "pgup",
-			PageDown:  "pgdown",
-			Tab:       "tab",
-			ShiftTab:  "shift+tab",
-			Filter:    "/",
-			Copy:       "y",
-			CopyCurl:   "Y",
-			GotoSource: "g",
-			GotoConfig: "G",
+			Up:          "up",
+			Down:        "down",
+			Confirm:     "enter",
+			Back:        "esc",
+			Options:     "o",
+			Quit:        "q",
+			Invoke:      "i",
+			InvokeBuild: "I",
+			QuickBench:  "r",
+			NewTest:     "n",
+			Edit:        "e",
+			Delete:      "d",
+			ToggleAPI:   "a",
+			Benchmark:   "b",
+			Scaffold:    "s",
+			Help:        "?",
+			PageUp:      "pgup",
+			PageDown:    "pgdown",
+			Tab:         "tab",
+			ShiftTab:    "shift+tab",
+			Filter:      "/",
+			Copy:        "y",
+			CopyCurl:    "Y",
+			GotoSource:  "g",
+			GotoConfig:  "G",
 		},
 		Apps: Apps{Editor: ""},
 	}
@@ -155,29 +161,31 @@ func Load() (*Config, error) {
 
 func applyKeybindDefaults(cfg *Config) {
 	d := Default().Keybinds
-	if cfg.Keybinds.Up == ""        { cfg.Keybinds.Up = d.Up }
-	if cfg.Keybinds.Down == ""      { cfg.Keybinds.Down = d.Down }
-	if cfg.Keybinds.Confirm == ""   { cfg.Keybinds.Confirm = d.Confirm }
-	if cfg.Keybinds.Back == ""      { cfg.Keybinds.Back = d.Back }
-	if cfg.Keybinds.Options == ""   { cfg.Keybinds.Options = d.Options }
-	if cfg.Keybinds.Quit == ""      { cfg.Keybinds.Quit = d.Quit }
-	if cfg.Keybinds.Invoke == ""    { cfg.Keybinds.Invoke = d.Invoke }
-	if cfg.Keybinds.NewTest == ""   { cfg.Keybinds.NewTest = d.NewTest }
-	if cfg.Keybinds.Edit == ""      { cfg.Keybinds.Edit = d.Edit }
-	if cfg.Keybinds.Delete == ""    { cfg.Keybinds.Delete = d.Delete }
-	if cfg.Keybinds.ToggleAPI == "" { cfg.Keybinds.ToggleAPI = d.ToggleAPI }
-	if cfg.Keybinds.Benchmark == "" { cfg.Keybinds.Benchmark = d.Benchmark }
-	if cfg.Keybinds.Scaffold == ""  { cfg.Keybinds.Scaffold = d.Scaffold }
-	if cfg.Keybinds.Help == ""      { cfg.Keybinds.Help = d.Help }
-	if cfg.Keybinds.PageUp == ""    { cfg.Keybinds.PageUp = d.PageUp }
-	if cfg.Keybinds.PageDown == ""  { cfg.Keybinds.PageDown = d.PageDown }
-	if cfg.Keybinds.Tab == ""       { cfg.Keybinds.Tab = d.Tab }
-	if cfg.Keybinds.ShiftTab == ""  { cfg.Keybinds.ShiftTab = d.ShiftTab }
-	if cfg.Keybinds.Filter == ""      { cfg.Keybinds.Filter = d.Filter }
-	if cfg.Keybinds.Copy == ""        { cfg.Keybinds.Copy = d.Copy }
-	if cfg.Keybinds.CopyCurl == ""    { cfg.Keybinds.CopyCurl = d.CopyCurl }
-	if cfg.Keybinds.GotoSource == ""  { cfg.Keybinds.GotoSource = d.GotoSource }
-	if cfg.Keybinds.GotoConfig == ""  { cfg.Keybinds.GotoConfig = d.GotoConfig }
+	if cfg.Keybinds.Up == ""           { cfg.Keybinds.Up = d.Up }
+	if cfg.Keybinds.Down == ""         { cfg.Keybinds.Down = d.Down }
+	if cfg.Keybinds.Confirm == ""      { cfg.Keybinds.Confirm = d.Confirm }
+	if cfg.Keybinds.Back == ""         { cfg.Keybinds.Back = d.Back }
+	if cfg.Keybinds.Options == ""      { cfg.Keybinds.Options = d.Options }
+	if cfg.Keybinds.Quit == ""         { cfg.Keybinds.Quit = d.Quit }
+	if cfg.Keybinds.Invoke == ""       { cfg.Keybinds.Invoke = d.Invoke }
+	if cfg.Keybinds.InvokeBuild == ""  { cfg.Keybinds.InvokeBuild = d.InvokeBuild }
+	if cfg.Keybinds.QuickBench == ""   { cfg.Keybinds.QuickBench = d.QuickBench }
+	if cfg.Keybinds.NewTest == ""      { cfg.Keybinds.NewTest = d.NewTest }
+	if cfg.Keybinds.Edit == ""         { cfg.Keybinds.Edit = d.Edit }
+	if cfg.Keybinds.Delete == ""       { cfg.Keybinds.Delete = d.Delete }
+	if cfg.Keybinds.ToggleAPI == ""    { cfg.Keybinds.ToggleAPI = d.ToggleAPI }
+	if cfg.Keybinds.Benchmark == ""    { cfg.Keybinds.Benchmark = d.Benchmark }
+	if cfg.Keybinds.Scaffold == ""     { cfg.Keybinds.Scaffold = d.Scaffold }
+	if cfg.Keybinds.Help == ""         { cfg.Keybinds.Help = d.Help }
+	if cfg.Keybinds.PageUp == ""       { cfg.Keybinds.PageUp = d.PageUp }
+	if cfg.Keybinds.PageDown == ""     { cfg.Keybinds.PageDown = d.PageDown }
+	if cfg.Keybinds.Tab == ""          { cfg.Keybinds.Tab = d.Tab }
+	if cfg.Keybinds.ShiftTab == ""     { cfg.Keybinds.ShiftTab = d.ShiftTab }
+	if cfg.Keybinds.Filter == ""       { cfg.Keybinds.Filter = d.Filter }
+	if cfg.Keybinds.Copy == ""         { cfg.Keybinds.Copy = d.Copy }
+	if cfg.Keybinds.CopyCurl == ""     { cfg.Keybinds.CopyCurl = d.CopyCurl }
+	if cfg.Keybinds.GotoSource == ""   { cfg.Keybinds.GotoSource = d.GotoSource }
+	if cfg.Keybinds.GotoConfig == ""   { cfg.Keybinds.GotoConfig = d.GotoConfig }
 }
 
 func needsMigration(path string) bool {
@@ -245,29 +253,31 @@ func buildTOML(cfg *Config) string {
 
 func keybindValues(k *Keybinds) map[string]string {
 	return map[string]string{
-		"up":         k.Up,
-		"down":       k.Down,
-		"confirm":    k.Confirm,
-		"back":       k.Back,
-		"quit":       k.Quit,
-		"options":    k.Options,
-		"invoke":     k.Invoke,
-		"new_test":   k.NewTest,
-		"edit":       k.Edit,
-		"delete":     k.Delete,
-		"toggle_api": k.ToggleAPI,
-		"benchmark":  k.Benchmark,
-		"scaffold":   k.Scaffold,
-		"help":       k.Help,
-		"page_up":    k.PageUp,
-		"page_down":  k.PageDown,
-		"tab":        k.Tab,
-		"shift_tab":  k.ShiftTab,
-		"filter":      k.Filter,
-		"copy":        k.Copy,
-		"copy_curl":   k.CopyCurl,
-		"goto_source": k.GotoSource,
-		"goto_config": k.GotoConfig,
+		"up":           k.Up,
+		"down":         k.Down,
+		"confirm":      k.Confirm,
+		"back":         k.Back,
+		"quit":         k.Quit,
+		"options":      k.Options,
+		"invoke":       k.Invoke,
+		"invoke_build": k.InvokeBuild,
+		"quick_bench":  k.QuickBench,
+		"new_test":     k.NewTest,
+		"edit":         k.Edit,
+		"delete":       k.Delete,
+		"toggle_api":   k.ToggleAPI,
+		"benchmark":    k.Benchmark,
+		"scaffold":     k.Scaffold,
+		"help":         k.Help,
+		"page_up":      k.PageUp,
+		"page_down":    k.PageDown,
+		"tab":          k.Tab,
+		"shift_tab":    k.ShiftTab,
+		"filter":       k.Filter,
+		"copy":         k.Copy,
+		"copy_curl":    k.CopyCurl,
+		"goto_source":  k.GotoSource,
+		"goto_config":  k.GotoConfig,
 	}
 }
 

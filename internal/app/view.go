@@ -32,6 +32,8 @@ func (m Model) View() string {
 		b.WriteString(m.renderBuildRunning())
 	case ModeInvoking:
 		b.WriteString(m.renderInvoking())
+	case ModeQuickBench:
+		b.WriteString(m.renderQuickBench())
 	default:
 		b.WriteString(m.renderMain())
 	}
@@ -537,6 +539,31 @@ func (m Model) renderInvoking() string {
 		ui.StyleMuted.Render("  Please wait.") + "\n"
 }
 
+func (m Model) renderQuickBench() string {
+	fn := m.selectedFunction()
+	name := "function"
+	if fn != nil {
+		name = fn.Name
+	}
+	progress := fmt.Sprintf("%d / %d", m.quickBenchDone+1, m.quickBenchTotal)
+	bar := renderProgressBar(m.quickBenchDone, m.quickBenchTotal, 30)
+	return "\n" + ui.StyleAccent.Render("  Quick-bench: "+name) + "\n\n" +
+		"  " + bar + "  " + ui.StyleMuted.Render(progress) + "\n\n" +
+		ui.StyleMuted.Render("  Running iterations — benchmark pane will open when done.") + "\n"
+}
+
+// renderProgressBar returns a simple █░ progress bar of the given width.
+func renderProgressBar(done, total, width int) string {
+	if total <= 0 {
+		return strings.Repeat("░", width)
+	}
+	filled := done * width / total
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
 func (m Model) renderErrorOverlay() string {
 	box := ui.StyleConfirmBox.Render(
 		ui.StyleError.Render("Error") + "\n\n" +
@@ -574,7 +601,9 @@ func (m Model) renderHelp() string {
 		{"[" + k.tab + "]", "Jump to next section (Functions → Tests → Models)"},
 		{"[" + k.shiftTab + "]", "Jump to previous section"},
 		{"[" + k.filter + "]", "Filter / search across all sections"},
-		{"[" + k.invoke + "]", "Invoke selected function / test"},
+		{"[" + k.invoke + "]", "Invoke selected function / test (no build)"},
+		{"[" + k.invokeBuild + "]", "Build then invoke selected function / test"},
+		{"[" + k.quickBench + "]", "Run N times for benchmarking (bench_runs in .lambit.toml)"},
 		{"[" + k.edit + "]", "Edit selected item (handler / payload / model)"},
 		{"[" + k.copy + "]", "Copy name / curl command / dotnet test filter to clipboard"},
 		{"[" + k.copyCurl + "]", "Copy as curl command (uses live API endpoint when server is running)"},
@@ -633,7 +662,7 @@ func (m Model) renderStatusBar() string {
 	// Output pane active.
 	if m.outputMode {
 		return ui.StyleMuted.Render(
-			"  ["+k.up+"/"+k.down+"]Scroll output  [any key]Dismiss  ["+k.invoke+"]Re-invoke",
+			"  ["+k.up+"/"+k.down+"]Scroll output  [any key]Dismiss  ["+k.invoke+"]Re-invoke  ["+k.invokeBuild+"]Build+Re-invoke",
 		) + "\n"
 	}
 
@@ -663,6 +692,8 @@ func (m Model) renderStatusBar() string {
 		"["+k.tab+"]Tab",
 		"["+k.filter+"]Filter",
 		"["+k.invoke+"]Invoke",
+		"["+k.invokeBuild+"]Build+Invoke",
+		"["+k.quickBench+"]QuickBench",
 		"["+k.edit+"]"+m.editHint(),
 		"["+k.copy+"]"+m.copyHint(),
 		"["+k.copyCurl+"]"+m.copyCurlHint(),

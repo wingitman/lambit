@@ -14,9 +14,13 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Glo
 - Reads handler strings from `template.yaml`, `aws-lambda-tools-defaults.json`, or infers them from `.csproj`
 - Discovers **xUnit `[Fact]` and `[Theory]`** test methods and surfaces them as invocable items (marked `⊕`)
 - Invoke functions with custom JSON payloads or auto-discovered test cases
+- Separate **invoke** (`i`, no build) and **build + invoke** (`I`) keybinds
 - Create, edit and delete named test cases and data model templates
-- Real-time **benchmark bar chart** (`█░`) across the last 20 invocations
+- **Quick-bench** (`r`) — run a function N times and see min/max/avg/p95 stats instantly
 - **Local HTTP API server** — `POST http://localhost:8080/<function-name>` while lambit is running
+- **Live filter / search** across functions, tests, and models with `/`
+- **Clipboard copy** — context-sensitive (`y`) or always-curl (`Y`)
+- **Jump to source** — open the handler or test definition in `$EDITOR` with `g`
 - Every keybind remappable via a `.toml` config file
 - Scaffold a `.lambit.toml` project file with auto-detected handlers in one keypress
 
@@ -67,18 +71,77 @@ On first run in a new project, lambit will show a **no project file** screen. Pr
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate |
-| `i` | Invoke selected function / test |
+| `PgUp` / `PgDn` | Jump 5 items; scroll output pane |
+| `Tab` / `Shift+Tab` | Jump to next / previous section |
+| `Enter` | Lock selected function (keeps its tests visible while browsing) |
+| `Esc` | Back / cancel |
+| `/` | Open live filter |
+| `i` | Invoke selected function / test (no build) |
+| `I` | Build then invoke selected function / test |
+| `r` | Quick-bench: run N times and open benchmark with stats |
 | `e` | Edit selected item (handler string, payload, or model JSON) |
 | `n` | New test case |
 | `d` | Delete selected test / model |
 | `a` | Toggle local HTTP API server |
 | `b` | Toggle benchmark pane |
+| `y` | Copy to clipboard (context-sensitive) |
+| `Y` | Copy curl command to clipboard |
+| `g` | Open source file in `$EDITOR` at the definition line |
+| `G` | Open `.lambit.toml` in `$EDITOR` at the selected entry |
 | `s` | Scaffold `.lambit.toml` |
-| `o` | Open config file in `$EDITOR` |
+| `o` | Open global config file in `$EDITOR` |
 | `?` | Keybind help |
-| `q` | Quit |
+| `q` / `Ctrl+C` | Quit |
 
 All keybinds are remappable — see [Config](#config).
+
+### Live filter
+
+Press `/` to open a live filter. Results are grouped: matching Functions first, then Tests (with function name headers), then Models. Use `↑`/`↓` to navigate, `Enter` to jump to an item, and `Esc` to clear the filter.
+
+### Copy to clipboard
+
+`y` copies different things depending on context:
+
+| Context | What is copied |
+|---------|----------------|
+| Functions section | Function name |
+| Tests section (xUnit) | `dotnet test --filter FullyQualifiedName~...` command |
+| Tests section (payload) | `curl` command for the local API |
+| Models section | Model JSON |
+
+`Y` always copies a `curl` command. For xUnit test cases it uses the two-segment API path (`POST /<fn>/<test-case>`).
+
+### Jump to source
+
+`g` opens the source file in `$EDITOR` at the exact line of the selected handler or test definition. lambit knows how to jump to a specific line in vim, nvim, nano, emacs, VS Code, and Notepad++.
+
+`G` opens `.lambit.toml` at the line matching the selected item.
+
+### Locking a function
+
+Pressing `Enter` on a function "locks" it — the Tests pane continues to show that function's tests even as you browse the Functions list. A locked function is marked with `●`.
+
+### Output pane
+
+After an invocation the output pane opens on the right. Use `↑`/`↓` or `PgUp`/`PgDn` to scroll it, and `i` or `I` to re-invoke (without build or with build respectively) without leaving. Any other key closes it.
+
+### Invoke vs build + invoke
+
+`i` invokes immediately with no build step — useful for rapid iteration when you haven't changed code. `I` runs a full build first (e.g. `dotnet build`) then invokes. Use `I` after making code changes; use `i` for repeated test runs.
+
+### Quick-bench (`r`)
+
+Press `r` to run the selected function or test `bench_runs` times consecutively (default: 10, configurable per-project in `.lambit.toml`). A progress bar shows each iteration as it runs. When done, the benchmark pane opens automatically with a bar chart and summary stats:
+
+```
+  FunctionHandler  ████████████████░░░░░░░░   45ms  ✓
+  FunctionHandler  ██████████░░░░░░░░░░░░░░   28ms  ✓
+  ...
+                   min 22ms    avg 38ms    p95 51ms    max 67ms    10/10 ok
+```
+
+The stats row (min / avg / p95 / max / success rate) makes the benchmark pane useful as an actual measurement tool rather than just a visual.
 
 ### xUnit test discovery
 
@@ -94,15 +157,21 @@ Discovered tests are never written to `.lambit.toml` — they re-scan from sourc
 
 ### Local HTTP API
 
-Press `a` to start a local HTTP server (default port `8080`). While running, invoke any function via HTTP:
+Press `a` to start a local HTTP server (default port `8080`). The status bar shows the server address and a running call count. While running, two routes are available:
 
+**Invoke with a custom payload:**
 ```bash
 curl -X POST http://localhost:8080/FunctionHandler \
      -H "Content-Type: application/json" \
      -d '{"input": "hello world"}'
 ```
 
-The port is configurable in `.lambit.toml`.
+**Invoke a named test case (including xUnit tests):**
+```bash
+curl -X POST http://localhost:8080/FunctionHandler/HelloWorld
+```
+
+The port is configurable in `.lambit.toml`. API results update the results strip and benchmark without interrupting the TUI.
 
 ---
 
@@ -112,14 +181,16 @@ lambit stores per-project configuration in `.lambit.toml` at the project root. P
 
 ```toml
 [project]
-name     = "MyFunction"
-runtime  = ""       # leave empty for auto-detect, or "dotnet" / "nodejs"
-api_port = 8080
+name       = "MyFunction"
+runtime    = ""   # leave empty for auto-detect, or "dotnet" / "nodejs"
+api_port   = 8080
+bench_runs = 10   # iterations for quick-bench (r)
 
 [[functions]]
 name        = "FunctionHandler"
 handler     = "MyFunction::MyFunction.Function::FunctionHandler"
 description = "Main lambda entry point"
+root        = ""  # optional: subdirectory where the lambda lives (for monorepos)
 
 [[functions.tests]]
 name    = "Hello world"
@@ -129,6 +200,26 @@ payload = '{"input": "hello world"}'
 name = "SamplePayload"
 json = '{"key": "value", "count": 1}'
 ```
+
+lambit searches the current directory and all parent directories for `.lambit.toml`, so you can run it from a subdirectory of your project. The `s` scaffold command will error if a project file already exists rather than overwriting it.
+
+### Monorepo / multi-lambda projects
+
+When a single `.lambit.toml` covers multiple lambdas in subdirectories, set `root` on each function to tell lambit where that lambda's shim, build output, and source files live:
+
+```toml
+[[functions]]
+name    = "GreetFunction"
+handler = "GreetingFunction::GreetingFunction.Function::Greet"
+root    = "dotnet-greeting"   # relative to the .lambit.toml directory
+
+[[functions]]
+name    = "TransformFunction"
+handler = "index.handler"
+root    = "node-transform"
+```
+
+When `root` is set, all runtime operations (shim path, build command, invoke command, go-to-source) use `root` as the effective project root for that function. When omitted, the directory containing `.lambit.toml` is used.
 
 ---
 
@@ -142,28 +233,43 @@ lambit reads a global config file from the platform-appropriate location:
 | macOS | `~/Library/Application Support/delbysoft/lambit.toml` |
 | Windows | `%APPDATA%\delbysoft\lambit.toml` |
 
-Press `o` inside lambit to open the config file in `$EDITOR`. A default config is created on first launch.
+Press `o` inside lambit to open the config file in `$EDITOR`. A default config is created on first launch, and any new keybinds added in a future version are automatically added to your existing config file.
 
 Example config:
 
 ```toml
 [keybinds]
-up         = "up"
-down       = "down"
-invoke     = "i"
-edit       = "e"
-new_test   = "n"
-delete     = "d"
-toggle_api = "a"
-benchmark  = "b"
-scaffold   = "s"
-options    = "o"
-help       = "?"
-quit       = "q"
+up           = "up"
+down         = "down"
+page_up      = "pgup"
+page_down    = "pgdown"
+tab          = "tab"
+shift_tab    = "shift+tab"
+confirm      = "enter"
+back         = "esc"
+invoke       = "i"
+invoke_build = "I"
+quick_bench  = "r"
+edit         = "e"
+new_test     = "n"
+delete       = "d"
+toggle_api   = "a"
+benchmark    = "b"
+filter       = "/"
+copy         = "y"
+copy_curl    = "Y"
+goto_source  = "g"
+goto_config  = "G"
+scaffold     = "s"
+options      = "o"
+help         = "?"
+quit         = "q"
 
 [apps]
-editor = ""   # leave empty to use $EDITOR env var
+editor = ""   # leave empty to use $EDITOR / $VISUAL, or set e.g. "nvim"
 ```
+
+When `editor` is empty, lambit tries `$EDITOR`, then `$VISUAL`, then scans for `nano`, `vi`, `vim`, `nvim`, `code`, and `notepad.exe` in that order.
 
 ---
 
@@ -237,4 +343,3 @@ Remove-Item -Recurse "$env:APPDATA\delbysoft"
 MIT — see [LICENSE](LICENSE).
 
 Copyright (c) 2026 [delbysoft](https://github.com/wingitman)
-
