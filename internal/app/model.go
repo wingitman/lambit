@@ -2,16 +2,17 @@ package app
 
 import (
 	"fmt"
-	"strconv"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/wingitman/lambit/internal/bench"
@@ -19,8 +20,9 @@ import (
 	"github.com/wingitman/lambit/internal/invoke"
 	"github.com/wingitman/lambit/internal/project"
 	"github.com/wingitman/lambit/internal/runtime"
-	"github.com/atotto/clipboard"
 	"github.com/wingitman/lambit/internal/server"
+	appupdate "github.com/wingitman/lambit/internal/update"
+	"github.com/wingitman/lambit/internal/version"
 )
 
 // ─── API shared state ─────────────────────────────────────────────────────────
@@ -48,16 +50,18 @@ func (s *apiSharedState) set(proj *project.Project, rt runtime.Runtime) {
 type Mode int
 
 const (
-	ModeNormal      Mode = iota
-	ModeInvoking         // subprocess running
-	ModeEdit             // context-sensitive text input
-	ModeNewTest          // two-step text input: name then payload
-	ModeFilter           // live filter / search
-	ModeHelp             // keybind overlay
-	ModeError            // error panel
-	ModeNoProject        // no .lambit.toml found
-	ModeBuildRunning     // build subprocess running
-	ModeQuickBench       // running N consecutive invocations for benchmarking
+	ModeNormal       Mode = iota
+	ModeInvoking          // subprocess running
+	ModeEdit              // context-sensitive text input
+	ModeNewTest           // two-step text input: name then payload
+	ModeFilter            // live filter / search
+	ModeHelp              // keybind overlay
+	ModeError             // error panel
+	ModeNoProject         // no .lambit.toml found
+	ModeBuildRunning      // build subprocess running
+	ModeQuickBench        // running N consecutive invocations for benchmarking
+	ModeUpdatePrompt      // startup update prompt
+	ModeUpdates           // update history/install screen
 )
 
 type InputStep int
@@ -80,9 +84,9 @@ const (
 // filterResult is one row in the live-filtered list.
 type filterResult struct {
 	section  PanelSection
-	fnIdx    int  // index into proj.Functions
-	testIdx  int  // index into fn.Tests; -1 when not a test row
-	modelIdx int  // index into proj.Models; -1 when not a model row
+	fnIdx    int // index into proj.Functions
+	testIdx  int // index into fn.Tests; -1 when not a test row
+	modelIdx int // index into proj.Models; -1 when not a model row
 	label    string
 	isHeader bool // non-selectable function-name header row above its tests
 	isXUnit  bool // display the ⊕ marker
@@ -136,12 +140,12 @@ type Model struct {
 	filterResults []filterResult // computed on every keystroke
 	filterCursor  int            // index into filterResults (skips headers)
 
-	benchVisible       bool
-	apiServer          *server.Server
-	statusMsg          string
-	apiCallCount       int // number of requests handled by the API server this session
-	quickBenchTotal    int // total iterations requested for the current quick-bench run
-	quickBenchDone     int // iterations completed so far
+	benchVisible    bool
+	apiServer       *server.Server
+	statusMsg       string
+	apiCallCount    int // number of requests handled by the API server this session
+	quickBenchTotal int // total iterations requested for the current quick-bench run
+	quickBenchDone  int // iterations completed so far
 
 	// Shared state read by the HTTP server goroutine.
 	shared *apiSharedState
@@ -152,6 +156,11 @@ type Model struct {
 	lastOutputIsErr bool
 	outputMode      bool
 	outputScroll    int
+
+	updateInfo     appupdate.Info
+	updateChecking bool
+	updateCursor   int
+	updateExpanded map[string]bool
 }
 
 type invocationRecord struct {
@@ -188,6 +197,7 @@ type resolvedKeys struct {
 	copyCurl    string
 	gotoSource  string
 	gotoConfig  string
+	showUpdates string
 }
 
 func resolveKeys(k config.Keybinds) resolvedKeys {
@@ -217,6 +227,7 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		copyCurl:    k.CopyCurl,
 		gotoSource:  k.GotoSource,
 		gotoConfig:  k.GotoConfig,
+		showUpdates: k.ShowUpdates,
 	}
 }
 
@@ -239,7 +250,7 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 	fi.CharLimit = 80
 
 	m := &Model{
-		shared: &apiSharedState{},
+		shared:      &apiSharedState{},
 		cfg:         cfg,
 		keys:        resolveKeys(cfg.Keybinds),
 		bench:       bench.New(),
@@ -485,7 +496,12 @@ func injectNoBuild(args []string) []string {
 
 // ─── Tea interface ────────────────────────────────────────────────────────────
 
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd {
+	if m.cfg == nil || m.cfg.Updates.DisableChecks {
+		return nil
+	}
+	return checkUpdatesCmd(m.cfg)
+}
 
 // ─── Message types ────────────────────────────────────────────────────────────
 
@@ -498,6 +514,8 @@ type buildDoneMsg struct {
 type scaffoldReloadMsg struct{ dir string }
 type clearStatusMsg struct{}
 type quickBenchResultMsg struct{ record invocationRecord } // one iteration of a quick-bench run
+type updateCheckMsg struct{ info appupdate.Info }
+type updateLaunchMsg struct{ err string }
 
 // ─── Update ──────────────────────────────────────────────────────────────────
 
@@ -575,6 +593,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scaffoldReloadMsg:
 		return m.handleScaffoldReload(msg.dir)
 
+	case updateCheckMsg:
+		m.updateChecking = false
+		m.updateInfo = msg.info
+		if msg.info.CheckError != "" {
+			return m, nil
+		}
+		if len(msg.info.Available) > 0 {
+			m.updateCursor = 0
+			m.mode = ModeUpdatePrompt
+		}
+		return m, nil
+
+	case updateLaunchMsg:
+		if msg.err != "" {
+			m.errorMsg = msg.err
+			m.mode = ModeError
+			return m, nil
+		}
+		if m.apiServer != nil {
+			m.apiServer.Stop()
+		}
+		return m, tea.Quit
+
 	case tea.KeyMsg:
 		return m.handleKey(msg.String())
 	}
@@ -642,6 +683,82 @@ func (m Model) handleScaffoldReload(dir string) (tea.Model, tea.Cmd) {
 	return m, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg { return clearStatusMsg{} })
 }
 
+// ─── Updates helpers ─────────────────────────────────────────────────────────
+
+func checkUpdatesCmd(cfg *config.Config) tea.Cmd {
+	return func() tea.Msg {
+		return updateCheckMsg{info: appupdate.Check(cfg, version.Commit, 20)}
+	}
+}
+
+func (m Model) launchUpdate(latest bool, targetCommit string) tea.Cmd {
+	if latest && targetCommit == "" {
+		targetCommit = m.updateInfo.LatestCommit
+	}
+	repoPath := m.updateInfo.RepoPath
+	if repoPath == "" && m.cfg != nil {
+		repoPath = m.cfg.Updates.RepoPath
+	}
+	recorder, _ := os.Executable()
+	terminal := ""
+	if m.cfg != nil {
+		terminal = m.cfg.Updates.Terminal
+	}
+	req := appupdate.InstallRequest{
+		RepoPath:       repoPath,
+		TargetCommit:   targetCommit,
+		Latest:         latest,
+		Terminal:       terminal,
+		RecorderBinary: recorder,
+	}
+	return func() tea.Msg {
+		if err := appupdate.LaunchDetached(req); err != nil {
+			return updateLaunchMsg{err: err.Error()}
+		}
+		return updateLaunchMsg{}
+	}
+}
+
+func (m *Model) updateCommits() []appupdate.Commit {
+	if len(m.updateInfo.Available) > 0 {
+		return m.updateInfo.Available
+	}
+	return m.updateInfo.History
+}
+
+func (m *Model) selectedUpdateCommit() *appupdate.Commit {
+	commits := m.updateCommits()
+	if len(commits) == 0 || m.updateCursor < 0 || m.updateCursor >= len(commits) {
+		return nil
+	}
+	return &commits[m.updateCursor]
+}
+
+func (m *Model) clampUpdateCursor() {
+	commits := m.updateCommits()
+	if len(commits) == 0 {
+		m.updateCursor = 0
+		return
+	}
+	if m.updateCursor < 0 {
+		m.updateCursor = 0
+	}
+	if m.updateCursor >= len(commits) {
+		m.updateCursor = len(commits) - 1
+	}
+}
+
+func (m *Model) toggleSelectedUpdateDetails() {
+	c := m.selectedUpdateCommit()
+	if c == nil {
+		return
+	}
+	if m.updateExpanded == nil {
+		m.updateExpanded = map[string]bool{}
+	}
+	m.updateExpanded[c.Hash] = !m.updateExpanded[c.Hash]
+}
+
 // ─── Key handling ─────────────────────────────────────────────────────────────
 
 func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
@@ -651,8 +768,78 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.mode == ModeUpdatePrompt {
+		switch key {
+		case "y", "Y":
+			return m, m.launchUpdate(true, "")
+		case "enter":
+			m.toggleSelectedUpdateDetails()
+			return m, nil
+		case "esc", "n", "N":
+			m.mode = ModeNormal
+			return m, nil
+		}
+		if matchKey(key, m.keys.up) {
+			m.updateCursor--
+			m.clampUpdateCursor()
+			return m, nil
+		}
+		if matchKey(key, m.keys.down) {
+			m.updateCursor++
+			m.clampUpdateCursor()
+			return m, nil
+		}
+		return m, nil
+	}
+
+	if m.mode == ModeUpdates {
+		switch {
+		case key == "esc" || matchKey(key, m.keys.quit):
+			m.mode = ModeNormal
+			return m, nil
+		case matchKey(key, m.keys.up):
+			m.updateCursor--
+			m.clampUpdateCursor()
+			return m, nil
+		case matchKey(key, m.keys.down):
+			m.updateCursor++
+			m.clampUpdateCursor()
+			return m, nil
+		case matchKey(key, m.keys.pageUp):
+			m.updateCursor -= 5
+			m.clampUpdateCursor()
+			return m, nil
+		case matchKey(key, m.keys.pageDown):
+			m.updateCursor += 5
+			m.clampUpdateCursor()
+			return m, nil
+		case matchKey(key, m.keys.confirm):
+			m.toggleSelectedUpdateDetails()
+			return m, nil
+		case matchKey(key, m.keys.filter):
+			m.updateChecking = true
+			return m, checkUpdatesCmd(m.cfg)
+		case key == "i" || key == "I":
+			if c := m.selectedUpdateCommit(); c != nil {
+				return m, m.launchUpdate(false, c.Hash)
+			}
+			return m, nil
+		case key == "y" || key == "Y":
+			return m, m.launchUpdate(true, "")
+		}
+		return m, nil
+	}
+
 	if m.mode == ModeNoProject {
 		switch {
+		case matchKey(key, m.keys.showUpdates):
+			m.updateCursor = 0
+			m.mode = ModeUpdates
+			if m.updateInfo.RepoPath == "" && !m.updateChecking {
+				m.updateChecking = true
+				return m, checkUpdatesCmd(m.cfg)
+			}
+			return m, nil
 		case matchKey(key, m.keys.scaffold):
 			return m.doScaffold()
 		case matchKey(key, m.keys.quit) || key == "ctrl+c":
@@ -783,6 +970,15 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 
 	case matchKey(key, m.keys.help):
 		m.mode = ModeHelp
+		return m, nil
+
+	case matchKey(key, m.keys.showUpdates):
+		m.updateCursor = 0
+		m.mode = ModeUpdates
+		if m.updateInfo.RepoPath == "" && !m.updateChecking {
+			m.updateChecking = true
+			return m, checkUpdatesCmd(m.cfg)
+		}
 		return m, nil
 
 	case matchKey(key, m.keys.options):
@@ -1147,11 +1343,11 @@ func (m *Model) computeFilterResults() {
 	for i, fn := range m.proj.Functions {
 		if strings.Contains(strings.ToLower(fn.Name), q) {
 			m.filterResults = append(m.filterResults, filterResult{
-				section: SectionFunctions,
-				fnIdx:   i,
-				testIdx: -1,
+				section:  SectionFunctions,
+				fnIdx:    i,
+				testIdx:  -1,
 				modelIdx: -1,
-				label:   fn.Name,
+				label:    fn.Name,
 			})
 		}
 	}

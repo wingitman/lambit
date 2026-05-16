@@ -1,6 +1,7 @@
 BINARY      := lambit
 INSTALL_DIR := $(HOME)/.local/bin
 BUILD_DIR   := bin
+COMMIT      := $(shell git rev-parse HEAD 2>/dev/null || printf dev)
 
 .PHONY: all build install install-shell uninstall clean test test-integration test-all cross-build
 
@@ -8,7 +9,7 @@ all: build
 
 build:
 	@mkdir -p $(BUILD_DIR)
-	go build -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY) .
+	go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY) .
 	@echo "Built: $(BUILD_DIR)/$(BINARY)"
 
 install: build
@@ -85,9 +86,9 @@ test-all: test test-integration
 # Cross-compile release binaries for all supported platforms
 cross-build:
 	@mkdir -p $(BUILD_DIR)
-	GOOS=darwin  GOARCH=arm64  go build -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY)-macos-arm64 .
-	GOOS=darwin  GOARCH=amd64  go build -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY)-macos-amd64 .
-	GOOS=linux   GOARCH=amd64  go build -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY)-linux-amd64 .
-	GOOS=linux   GOARCH=arm64  go build -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY)-linux-arm64 .
-	GOOS=windows GOARCH=amd64  go build -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY)-windows-amd64.exe .
+	GOOS=darwin  GOARCH=arm64  go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY)-macos-arm64 .
+	GOOS=darwin  GOARCH=amd64  go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY)-macos-amd64 .
+	GOOS=linux   GOARCH=amd64  go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY)-linux-amd64 .
+	GOOS=linux   GOARCH=arm64  go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY)-linux-arm64 .
+	GOOS=windows GOARCH=amd64  go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$(COMMIT)" -o $(BUILD_DIR)/$(BINARY)-windows-amd64.exe .
 	@echo "Cross-compiled binaries written to $(BUILD_DIR)/"

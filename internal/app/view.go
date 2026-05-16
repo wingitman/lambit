@@ -34,6 +34,10 @@ func (m Model) View() string {
 		b.WriteString(m.renderInvoking())
 	case ModeQuickBench:
 		b.WriteString(m.renderQuickBench())
+	case ModeUpdatePrompt:
+		b.WriteString(m.renderUpdatePrompt())
+	case ModeUpdates:
+		b.WriteString(m.renderUpdatesScreen())
 	default:
 		b.WriteString(m.renderMain())
 	}
@@ -336,9 +340,9 @@ func (m Model) renderRightPanel(width, height int) []string {
 		}
 		lines = append(lines, "")
 		k := m.keys
-		lines = append(lines, ui.StyleAccent.Render("  ["+k.confirm+"]") +
+		lines = append(lines, ui.StyleAccent.Render("  ["+k.confirm+"]")+
 			ui.StyleMuted.Render(" lock this function → view tests"))
-		lines = append(lines, ui.StyleAccent.Render("  ["+k.tab+"]") +
+		lines = append(lines, ui.StyleAccent.Render("  ["+k.tab+"]")+
 			ui.StyleMuted.Render(" jump to Tests section"))
 		return padLines(lines, height)
 	}
@@ -516,6 +520,7 @@ func (m Model) renderNoProject() string {
 	b.WriteString(ui.StyleMuted.Render("  lambit needs a .lambit.toml to know what lambda to work with.") + "\n\n")
 	b.WriteString(ui.StyleAccent.Render("  ["+k.scaffold+"]") +
 		ui.StyleMuted.Render(" Scaffold a .lambit.toml here (auto-detects handlers + tests)") + "\n")
+	b.WriteString(ui.StyleAccent.Render("  ["+k.showUpdates+"]") + ui.StyleMuted.Render(" Show updates") + "\n")
 	b.WriteString(ui.StyleAccent.Render("  ["+k.quit+"]") + ui.StyleMuted.Render(" Quit") + "\n\n")
 	b.WriteString(ui.StyleMuted.Render("  See SPEC.md for details on creating a custom runtime interface.") + "\n")
 	return b.String()
@@ -573,6 +578,114 @@ func (m Model) renderErrorOverlay() string {
 	return box + "\n"
 }
 
+func (m Model) renderUpdatePrompt() string {
+	commits := m.updateInfo.Available
+	rows := len(commits)
+	if rows > 5 {
+		rows = 5
+	}
+	start := m.updateCursor - rows/2
+	if start < 0 {
+		start = 0
+	}
+	if start+rows > len(commits) {
+		start = len(commits) - rows
+		if start < 0 {
+			start = 0
+		}
+	}
+	var b strings.Builder
+	b.WriteString(ui.StyleSuccess.Render("Update available") + "\n\n")
+	b.WriteString("Current: " + shortCommit(m.updateInfo.CurrentCommit) + "\n")
+	b.WriteString("Latest:  " + shortCommit(m.updateInfo.LatestCommit) + "\n")
+	if m.updateInfo.Branch != "" {
+		b.WriteString("Branch:  " + m.updateInfo.Branch + " -> " + m.updateInfo.Upstream + "\n")
+	}
+	b.WriteString("\nRecent changes:\n")
+	for i := start; i < start+rows && i < len(commits); i++ {
+		c := commits[i]
+		prefix := "  "
+		if i == m.updateCursor {
+			prefix = "> "
+		}
+		line := fmt.Sprintf("%s%s %s", prefix, c.Short, c.Subject)
+		if i == m.updateCursor {
+			line = ui.StyleSelected.Render(line)
+		}
+		b.WriteString(line + "\n")
+		if m.updateExpanded[c.Hash] && c.Body != "" {
+			b.WriteString(ui.StyleMuted.Render(indentLines(c.Body, "    ")) + "\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(ui.StyleMuted.Render("y install in new terminal and exit · enter show/hide details · n/esc skip"))
+	return "\n" + ui.StyleConfirmBox.Render(b.String()) + "\n"
+}
+
+func (m Model) renderUpdatesScreen() string {
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(ui.StyleSectionTitle.Render("  Updates") + "\n\n")
+	if m.updateChecking {
+		b.WriteString(ui.StyleMuted.Render("  Checking for updates...") + "\n")
+		return b.String()
+	}
+	if m.updateInfo.CheckError != "" {
+		b.WriteString(ui.StyleError.Render("  Check failed: ") + m.updateInfo.CheckError + "\n")
+		return b.String()
+	}
+	if m.updateInfo.RepoPath == "" {
+		b.WriteString(ui.StyleMuted.Render("  No update information loaded.") + "\n")
+		return b.String()
+	}
+	b.WriteString(ui.StyleMuted.Render("  Repo: ") + m.updateInfo.RepoPath + "\n")
+	b.WriteString(ui.StyleMuted.Render("  Branch: ") + m.updateInfo.Branch + " -> " + m.updateInfo.Upstream + "\n")
+	b.WriteString(ui.StyleMuted.Render("  Current: ") + shortCommit(m.updateInfo.CurrentCommit) + "\n")
+	b.WriteString(ui.StyleMuted.Render("  Latest: ") + shortCommit(m.updateInfo.LatestCommit) + "\n\n")
+
+	commits := m.updateCommits()
+	if len(commits) == 0 {
+		b.WriteString(ui.StyleSuccess.Render("  No newer commits found.") + "\n")
+		return b.String()
+	}
+	if len(m.updateInfo.Available) > 0 {
+		b.WriteString(ui.StyleSuccess.Render(fmt.Sprintf("  %d update(s) available", len(m.updateInfo.Available))) + "\n")
+	} else {
+		b.WriteString(ui.StyleMuted.Render("  Recent history") + "\n")
+	}
+
+	rows := m.height - 12
+	if rows < 3 {
+		rows = 3
+	}
+	if rows > len(commits) {
+		rows = len(commits)
+	}
+	start := m.updateCursor - rows/2
+	if start < 0 {
+		start = 0
+	}
+	if start+rows > len(commits) {
+		start = len(commits) - rows
+		if start < 0 {
+			start = 0
+		}
+	}
+	for i := start; i < start+rows && i < len(commits); i++ {
+		c := commits[i]
+		line := fmt.Sprintf("  %s  %s  %s", c.Short, c.Date, c.Subject)
+		if i == m.updateCursor {
+			line = ui.StyleSelected.Render(line)
+		}
+		b.WriteString(line + "\n")
+		if m.updateExpanded[c.Hash] && c.Body != "" {
+			b.WriteString(ui.StyleMuted.Render(indentLines(c.Body, "    ")) + "\n")
+		}
+	}
+	b.WriteString("\n" + ui.StyleMuted.Render("  [y]Install latest  [i]Install selected  [/]Refresh  [enter]Details  [esc]Back") + "\n")
+	return b.String()
+}
+
 func (m Model) renderInputOverlay() string {
 	var title string
 	switch m.mode {
@@ -615,6 +728,7 @@ func (m Model) renderHelp() string {
 		{"[" + k.benchmark + "]", "Toggle benchmark pane"},
 		{"[" + k.scaffold + "]", "Scaffold .lambit.toml"},
 		{"[" + k.options + "]", "Open config in $EDITOR"},
+		{"[" + k.showUpdates + "]", "Show update history and installers"},
 		{"[" + k.help + "]", "Show this help"},
 		{"[" + k.quit + "]", "Quit"},
 	}
@@ -704,6 +818,7 @@ func (m Model) renderStatusBar() string {
 		"["+k.toggleAPI+"]API",
 		"["+k.benchmark+"]Bench",
 		"["+k.options+"]Config",
+		"["+k.showUpdates+"]Updates",
 		"["+k.help+"]?",
 		"["+k.quit+"]Quit",
 	)
@@ -833,6 +948,24 @@ func formatDur(d time.Duration) string {
 		return fmt.Sprintf("%dms", d.Milliseconds())
 	}
 	return fmt.Sprintf("%.2fs", d.Seconds())
+}
+
+func shortCommit(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+func indentLines(s, prefix string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func clamp(v, lo, hi int) int {

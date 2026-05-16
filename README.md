@@ -90,6 +90,7 @@ On first run in a new project, lambit will show a **no project file** screen. Pr
 | `G` | Open `.lambit.toml` in `$EDITOR` at the selected entry |
 | `s` | Scaffold `.lambit.toml` |
 | `o` | Open global config file in `$EDITOR` |
+| `U` | Show updates, recent changes, and install history commits |
 | `?` | Keybind help |
 | `q` / `Ctrl+C` | Quit |
 
@@ -262,14 +263,27 @@ goto_source  = "g"
 goto_config  = "G"
 scaffold     = "s"
 options      = "o"
+show_updates = "U"
 help         = "?"
 quit         = "q"
 
 [apps]
 editor = ""   # leave empty to use $EDITOR / $VISUAL, or set e.g. "nvim"
+
+[updates]
+disable_checks = false  # true disables startup update checks
+current_commit = ""     # installed app commit, maintained by lambit
+repo_path = ""          # source checkout used for updates
+terminal = ""           # optional terminal command for detached updates
 ```
 
 When `editor` is empty, lambit tries `$EDITOR`, then `$VISUAL`, then scans for `nano`, `vi`, `vim`, `nvim`, `code`, and `notepad.exe` in that order.
+
+### Updates
+
+On launch, lambit checks the configured source checkout with `git fetch --prune --all`. If commits exist between the installed commit and the current branch's upstream, it prompts before updating.
+
+Updates run in a separate terminal and lambit exits before the installer starts. The updater uses your checkout's current branch/upstream, so forks and feature branches are preserved. Press `U` to review recent commits, expand commit descriptions, install latest, or install an older history commit.
 
 ---
 

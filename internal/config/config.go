@@ -35,6 +35,7 @@ type Keybinds struct {
 	CopyCurl    string `toml:"copy_curl"`
 	GotoSource  string `toml:"goto_source"`
 	GotoConfig  string `toml:"goto_config"`
+	ShowUpdates string `toml:"show_updates"`
 }
 
 // Apps holds default application overrides.
@@ -42,10 +43,19 @@ type Apps struct {
 	Editor string `toml:"editor"`
 }
 
+// Updates holds update-check and installer preferences.
+type Updates struct {
+	DisableChecks bool   `toml:"disable_checks"`
+	CurrentCommit string `toml:"current_commit"`
+	RepoPath      string `toml:"repo_path"`
+	Terminal      string `toml:"terminal"`
+}
+
 // Config is the root config struct.
 type Config struct {
 	Keybinds Keybinds `toml:"keybinds"`
 	Apps     Apps     `toml:"apps"`
+	Updates  Updates  `toml:"updates"`
 }
 
 // keybindEntries is the authoritative list of every keybind TOML key.
@@ -70,14 +80,17 @@ var keybindEntries = []struct{ key, comment string }{
 	{"page_down", "page down"},
 	{"tab", "jump to next section (Functions → Tests → Models)"},
 	{"shift_tab", "jump to previous section"},
-	{"filter",      "open filter / search"},
-	{"copy",        "copy name / curl command / JSON to clipboard"},
-	{"copy_curl",   "copy as curl command (using API server when running)"},
+	{"filter", "open filter / search"},
+	{"copy", "copy name / curl command / JSON to clipboard"},
+	{"copy_curl", "copy as curl command (using API server when running)"},
 	{"goto_source", "open handler/.cs source file in $EDITOR at the method definition"},
 	{"goto_config", "open .lambit.toml in $EDITOR at the relevant entry"},
+	{"show_updates", "show update history and installers"},
 }
 
 var appEntries = []string{"editor"}
+
+var updateEntries = []string{"disable_checks", "current_commit", "repo_path", "terminal"}
 
 // Default returns a Config with all default values.
 func Default() *Config {
@@ -108,8 +121,15 @@ func Default() *Config {
 			CopyCurl:    "Y",
 			GotoSource:  "g",
 			GotoConfig:  "G",
+			ShowUpdates: "U",
 		},
 		Apps: Apps{Editor: ""},
+		Updates: Updates{
+			DisableChecks: false,
+			CurrentCommit: "",
+			RepoPath:      "",
+			Terminal:      "",
+		},
 	}
 }
 
@@ -161,31 +181,84 @@ func Load() (*Config, error) {
 
 func applyKeybindDefaults(cfg *Config) {
 	d := Default().Keybinds
-	if cfg.Keybinds.Up == ""           { cfg.Keybinds.Up = d.Up }
-	if cfg.Keybinds.Down == ""         { cfg.Keybinds.Down = d.Down }
-	if cfg.Keybinds.Confirm == ""      { cfg.Keybinds.Confirm = d.Confirm }
-	if cfg.Keybinds.Back == ""         { cfg.Keybinds.Back = d.Back }
-	if cfg.Keybinds.Options == ""      { cfg.Keybinds.Options = d.Options }
-	if cfg.Keybinds.Quit == ""         { cfg.Keybinds.Quit = d.Quit }
-	if cfg.Keybinds.Invoke == ""       { cfg.Keybinds.Invoke = d.Invoke }
-	if cfg.Keybinds.InvokeBuild == ""  { cfg.Keybinds.InvokeBuild = d.InvokeBuild }
-	if cfg.Keybinds.QuickBench == ""   { cfg.Keybinds.QuickBench = d.QuickBench }
-	if cfg.Keybinds.NewTest == ""      { cfg.Keybinds.NewTest = d.NewTest }
-	if cfg.Keybinds.Edit == ""         { cfg.Keybinds.Edit = d.Edit }
-	if cfg.Keybinds.Delete == ""       { cfg.Keybinds.Delete = d.Delete }
-	if cfg.Keybinds.ToggleAPI == ""    { cfg.Keybinds.ToggleAPI = d.ToggleAPI }
-	if cfg.Keybinds.Benchmark == ""    { cfg.Keybinds.Benchmark = d.Benchmark }
-	if cfg.Keybinds.Scaffold == ""     { cfg.Keybinds.Scaffold = d.Scaffold }
-	if cfg.Keybinds.Help == ""         { cfg.Keybinds.Help = d.Help }
-	if cfg.Keybinds.PageUp == ""       { cfg.Keybinds.PageUp = d.PageUp }
-	if cfg.Keybinds.PageDown == ""     { cfg.Keybinds.PageDown = d.PageDown }
-	if cfg.Keybinds.Tab == ""          { cfg.Keybinds.Tab = d.Tab }
-	if cfg.Keybinds.ShiftTab == ""     { cfg.Keybinds.ShiftTab = d.ShiftTab }
-	if cfg.Keybinds.Filter == ""       { cfg.Keybinds.Filter = d.Filter }
-	if cfg.Keybinds.Copy == ""         { cfg.Keybinds.Copy = d.Copy }
-	if cfg.Keybinds.CopyCurl == ""     { cfg.Keybinds.CopyCurl = d.CopyCurl }
-	if cfg.Keybinds.GotoSource == ""   { cfg.Keybinds.GotoSource = d.GotoSource }
-	if cfg.Keybinds.GotoConfig == ""   { cfg.Keybinds.GotoConfig = d.GotoConfig }
+	if cfg.Keybinds.Up == "" {
+		cfg.Keybinds.Up = d.Up
+	}
+	if cfg.Keybinds.Down == "" {
+		cfg.Keybinds.Down = d.Down
+	}
+	if cfg.Keybinds.Confirm == "" {
+		cfg.Keybinds.Confirm = d.Confirm
+	}
+	if cfg.Keybinds.Back == "" {
+		cfg.Keybinds.Back = d.Back
+	}
+	if cfg.Keybinds.Options == "" {
+		cfg.Keybinds.Options = d.Options
+	}
+	if cfg.Keybinds.Quit == "" {
+		cfg.Keybinds.Quit = d.Quit
+	}
+	if cfg.Keybinds.Invoke == "" {
+		cfg.Keybinds.Invoke = d.Invoke
+	}
+	if cfg.Keybinds.InvokeBuild == "" {
+		cfg.Keybinds.InvokeBuild = d.InvokeBuild
+	}
+	if cfg.Keybinds.QuickBench == "" {
+		cfg.Keybinds.QuickBench = d.QuickBench
+	}
+	if cfg.Keybinds.NewTest == "" {
+		cfg.Keybinds.NewTest = d.NewTest
+	}
+	if cfg.Keybinds.Edit == "" {
+		cfg.Keybinds.Edit = d.Edit
+	}
+	if cfg.Keybinds.Delete == "" {
+		cfg.Keybinds.Delete = d.Delete
+	}
+	if cfg.Keybinds.ToggleAPI == "" {
+		cfg.Keybinds.ToggleAPI = d.ToggleAPI
+	}
+	if cfg.Keybinds.Benchmark == "" {
+		cfg.Keybinds.Benchmark = d.Benchmark
+	}
+	if cfg.Keybinds.Scaffold == "" {
+		cfg.Keybinds.Scaffold = d.Scaffold
+	}
+	if cfg.Keybinds.Help == "" {
+		cfg.Keybinds.Help = d.Help
+	}
+	if cfg.Keybinds.PageUp == "" {
+		cfg.Keybinds.PageUp = d.PageUp
+	}
+	if cfg.Keybinds.PageDown == "" {
+		cfg.Keybinds.PageDown = d.PageDown
+	}
+	if cfg.Keybinds.Tab == "" {
+		cfg.Keybinds.Tab = d.Tab
+	}
+	if cfg.Keybinds.ShiftTab == "" {
+		cfg.Keybinds.ShiftTab = d.ShiftTab
+	}
+	if cfg.Keybinds.Filter == "" {
+		cfg.Keybinds.Filter = d.Filter
+	}
+	if cfg.Keybinds.Copy == "" {
+		cfg.Keybinds.Copy = d.Copy
+	}
+	if cfg.Keybinds.CopyCurl == "" {
+		cfg.Keybinds.CopyCurl = d.CopyCurl
+	}
+	if cfg.Keybinds.GotoSource == "" {
+		cfg.Keybinds.GotoSource = d.GotoSource
+	}
+	if cfg.Keybinds.GotoConfig == "" {
+		cfg.Keybinds.GotoConfig = d.GotoConfig
+	}
+	if cfg.Keybinds.ShowUpdates == "" {
+		cfg.Keybinds.ShowUpdates = d.ShowUpdates
+	}
 }
 
 func needsMigration(path string) bool {
@@ -200,6 +273,11 @@ func needsMigration(path string) bool {
 		}
 	}
 	for _, key := range appEntries {
+		if !fileContainsKey(content, key) {
+			return true
+		}
+	}
+	for _, key := range updateEntries {
 		if !fileContainsKey(content, key) {
 			return true
 		}
@@ -229,8 +307,28 @@ func WriteDefault(path string) error {
 	return os.WriteFile(path, []byte(buildTOML(Default())), 0644)
 }
 
+// RecordUpdateMetadata stores the installed commit and source repo path without
+// changing user-facing preferences.
+func RecordUpdateMetadata(commit, repoPath string) error {
+	cfg, err := Load()
+	if err != nil {
+		cfg = Default()
+	}
+	if commit != "" {
+		cfg.Updates.CurrentCommit = commit
+	}
+	if repoPath != "" {
+		cfg.Updates.RepoPath = repoPath
+	}
+	if err := os.MkdirAll(ConfigDir(), 0755); err != nil {
+		return err
+	}
+	return writeMigrated(ConfigPath(), cfg)
+}
+
 func buildTOML(cfg *Config) string {
 	vals := keybindValues(&cfg.Keybinds)
+	u := cfg.Updates
 	maxLen := 0
 	for _, e := range keybindEntries {
 		if len(e.key) > maxLen {
@@ -247,7 +345,12 @@ func buildTOML(cfg *Config) string {
 		out += e.key + pad + " = " + quote(val) + "  # " + e.comment + "\n"
 	}
 	out += "\n[apps]\n" +
-		"editor = " + quote(cfg.Apps.Editor) + "   # leave empty to use $EDITOR env var\n"
+		"editor = " + quote(cfg.Apps.Editor) + "   # leave empty to use $EDITOR env var\n\n" +
+		"[updates]\n" +
+		"disable_checks = " + boolStr(u.DisableChecks) + "   # true disables startup update checks\n" +
+		"current_commit = " + quote(u.CurrentCommit) + "   # installed app commit, maintained by lambit\n" +
+		"repo_path = " + quote(u.RepoPath) + "   # source checkout used for updates\n" +
+		"terminal = " + quote(u.Terminal) + "   # optional terminal command for detached updates\n"
 	return out
 }
 
@@ -278,7 +381,19 @@ func keybindValues(k *Keybinds) map[string]string {
 		"copy_curl":    k.CopyCurl,
 		"goto_source":  k.GotoSource,
 		"goto_config":  k.GotoConfig,
+		"show_updates": k.ShowUpdates,
 	}
 }
 
-func quote(s string) string { return `"` + s + `"` }
+func quote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
