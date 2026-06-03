@@ -36,11 +36,14 @@ type TestCase struct {
 
 // Function describes a discoverable lambda handler entry point.
 type Function struct {
-	Name        string     `toml:"name"`
-	Handler     string     `toml:"handler"`
-	Description string     `toml:"description,omitempty"`
-	Root        string     `toml:"root,omitempty"` // subdirectory relative to proj.Path; overrides project root for shim/build/invoke
-	Tests       []TestCase `toml:"tests"`
+	Name            string     `toml:"name"`
+	Handler         string     `toml:"handler"`
+	Description     string     `toml:"description,omitempty"`
+	Root            string     `toml:"root,omitempty"` // subdirectory relative to proj.Path; overrides project root for shim/build/invoke
+	AWSFunctionName string     `toml:"aws_function_name,omitempty"`
+	AWSRegion       string     `toml:"aws_region,omitempty"`
+	AWSProfile      string     `toml:"aws_profile,omitempty"`
+	Tests           []TestCase `toml:"tests"`
 }
 
 // Model is a named JSON blob used as a payload template.
@@ -53,12 +56,12 @@ type Model struct {
 type Project struct {
 	Path string `toml:"-"` // directory containing .lambit.toml (not persisted)
 
-	Name       string     `toml:"name"`
-	Runtime    string     `toml:"runtime"`
-	APIPort    int        `toml:"api_port"`
-	BenchRuns  int        `toml:"bench_runs"`
-	Functions  []Function `toml:"functions"`
-	Models     []Model    `toml:"models"`
+	Name      string     `toml:"name"`
+	Runtime   string     `toml:"runtime"`
+	APIPort   int        `toml:"api_port"`
+	BenchRuns int        `toml:"bench_runs"`
+	Functions []Function `toml:"functions"`
+	Models    []Model    `toml:"models"`
 }
 
 // DefaultAPIPort is used when the project file omits api_port.
@@ -222,6 +225,15 @@ func buildProjectTOML(p *Project) string {
 		out += "description = " + quote(fn.Description) + "\n"
 		if fn.Root != "" {
 			out += "root        = " + quote(fn.Root) + "\n"
+		}
+		if fn.AWSFunctionName != "" {
+			out += "aws_function_name = " + quote(fn.AWSFunctionName) + "\n"
+		}
+		if fn.AWSRegion != "" {
+			out += "aws_region        = " + quote(fn.AWSRegion) + "\n"
+		}
+		if fn.AWSProfile != "" {
+			out += "aws_profile       = " + quote(fn.AWSProfile) + "\n"
 		}
 		for _, t := range fn.Tests {
 			out += "\n[[functions.tests]]\n"

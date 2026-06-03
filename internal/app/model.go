@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,9 +16,13 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/wingitman/lambit/internal/archiveutil"
+	"github.com/wingitman/lambit/internal/awscli"
+	"github.com/wingitman/lambit/internal/awsmeta"
 	"github.com/wingitman/lambit/internal/bench"
 	"github.com/wingitman/lambit/internal/config"
 	"github.com/wingitman/lambit/internal/invoke"
+	"github.com/wingitman/lambit/internal/lambdapkg"
 	"github.com/wingitman/lambit/internal/project"
 	"github.com/wingitman/lambit/internal/runtime"
 	"github.com/wingitman/lambit/internal/server"
@@ -62,6 +67,11 @@ const (
 	ModeQuickBench        // running N consecutive invocations for benchmarking
 	ModeUpdatePrompt      // startup update prompt
 	ModeUpdates           // update history/install screen
+	ModeCloudInput        // cloud tab text input
+	ModeCloudRunning      // cloud subprocess/network operation running
+	ModeCloudChoice       // cloud action choice screen
+	ModeCloudConfirm      // cloud destructive confirmation screen
+	ModeCloudProfile      // cloud AWS CLI profile picker
 )
 
 type InputStep int
@@ -77,6 +87,33 @@ const (
 	SectionFunctions PanelSection = iota
 	SectionTests
 	SectionModels
+)
+
+type CloudInputKind int
+
+const (
+	CloudInputNone CloudInputKind = iota
+	CloudInputProfile
+	CloudInputSetupProfile
+	CloudInputRegion
+	CloudInputDownloadBaseDir
+	CloudInputDownloadDir
+	CloudInputDeployZip
+)
+
+type CloudProfileIntent int
+
+const (
+	CloudProfileSelect CloudProfileIntent = iota
+	CloudProfileLogin
+)
+
+type CloudConfirmKind int
+
+const (
+	CloudConfirmNone CloudConfirmKind = iota
+	CloudConfirmDeployAuto
+	CloudConfirmDeployZip
 )
 
 // ─── Filter result ────────────────────────────────────────────────────────────
@@ -161,6 +198,23 @@ type Model struct {
 	updateChecking bool
 	updateCursor   int
 	updateExpanded map[string]bool
+
+	cloudActive        bool
+	cloudProfile       string
+	cloudRegion        string
+	cloudFunctions     []awscli.Function
+	cloudCursor        int
+	cloudProfiles      []awscli.Profile
+	cloudProfileCursor int
+	cloudProfileIntent CloudProfileIntent
+	cloudDetected      []awsmeta.Mapping
+	cloudInputKind     CloudInputKind
+	cloudPendingPath   string
+	cloudConfirmKind   CloudConfirmKind
+	cloudConfirmTarget string
+	cloudStatus        string
+	cloudOutput        string
+	cloudOutputIsErr   bool
 }
 
 type invocationRecord struct {
@@ -198,6 +252,7 @@ type resolvedKeys struct {
 	gotoSource  string
 	gotoConfig  string
 	showUpdates string
+	cloud       string
 }
 
 func resolveKeys(k config.Keybinds) resolvedKeys {
@@ -228,6 +283,7 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		gotoSource:  k.GotoSource,
 		gotoConfig:  k.GotoConfig,
 		showUpdates: k.ShowUpdates,
+		cloud:       k.Cloud,
 	}
 }
 
@@ -257,6 +313,14 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 		textInput:   ti,
 		filterInput: fi,
 	}
+	if cfg != nil {
+		m.cloudProfile = cfg.AWS.Profile
+		m.cloudRegion = cfg.AWS.Region
+	}
+	if m.cloudRegion == "" {
+		m.cloudRegion = "us-east-1"
+	}
+	m.cloudDetected = awsmeta.Detect(projectDir)
 
 	proj, err := project.Load(projectDir)
 	if err != nil {
@@ -516,6 +580,20 @@ type clearStatusMsg struct{}
 type quickBenchResultMsg struct{ record invocationRecord } // one iteration of a quick-bench run
 type updateCheckMsg struct{ info appupdate.Info }
 type updateLaunchMsg struct{ err string }
+type cloudFunctionsMsg struct {
+	functions []awscli.Function
+	output    string
+	err       error
+}
+type cloudProfilesMsg struct {
+	profiles []awscli.Profile
+	err      error
+}
+type cloudDoneMsg struct {
+	message string
+	output  string
+	err     error
+}
 
 // ─── Update ──────────────────────────────────────────────────────────────────
 
@@ -616,12 +694,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 
+	case cloudFunctionsMsg:
+		m.mode = ModeNormal
+		m.cloudOutput = msg.output
+		m.cloudOutputIsErr = msg.err != nil
+		if msg.err != nil {
+			m.cloudStatus = "AWS list failed"
+			m.cloudOutput = msg.err.Error()
+			return m, nil
+		}
+		m.cloudFunctions = msg.functions
+		m.clampCloudCursor()
+		m.cloudStatus = fmt.Sprintf("Loaded %d Lambda functions", len(msg.functions))
+		return m, nil
+
+	case cloudProfilesMsg:
+		m.cloudOutput = ""
+		m.cloudOutputIsErr = msg.err != nil
+		if msg.err != nil {
+			m.mode = ModeNormal
+			m.cloudStatus = msg.err.Error()
+			m.cloudOutput = cloudSetupHint(m.awsClient(m.cloudProfile, m.cloudRegion).CLI)
+			return m, nil
+		}
+		m.cloudProfiles = msg.profiles
+		m.clampCloudProfileCursor()
+		m.mode = ModeCloudProfile
+		if len(msg.profiles) == 0 {
+			m.cloudStatus = "No AWS CLI profiles found"
+		} else {
+			m.cloudStatus = fmt.Sprintf("Found %d AWS CLI profiles", len(msg.profiles))
+		}
+		return m, nil
+
+	case cloudDoneMsg:
+		m.mode = ModeNormal
+		m.cloudOutput = msg.output
+		m.cloudOutputIsErr = msg.err != nil
+		if msg.err != nil {
+			m.cloudStatus = msg.err.Error()
+			return m, nil
+		}
+		m.cloudStatus = msg.message
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg.String())
 	}
 
 	switch m.mode {
-	case ModeEdit, ModeNewTest:
+	case ModeEdit, ModeNewTest, ModeCloudInput:
 		var cmd tea.Cmd
 		m.textInput, cmd = m.textInput.Update(msg)
 		return m, cmd
@@ -762,6 +884,10 @@ func (m *Model) toggleSelectedUpdateDetails() {
 // ─── Key handling ─────────────────────────────────────────────────────────────
 
 func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
+	if !m.isTextInputMode() && matchKey(key, m.keys.options) {
+		return m, m.openEditor(config.ConfigPath())
+	}
+
 	if m.mode == ModeError {
 		m.mode = ModeNormal
 		m.errorMsg = ""
@@ -828,6 +954,20 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 			return m, m.launchUpdate(true, "")
 		}
 		return m, nil
+	}
+
+	if matchKey(key, m.keys.cloud) && m.mode != ModeCloudInput && m.mode != ModeCloudRunning && m.mode != ModeCloudChoice && m.mode != ModeCloudConfirm && m.mode != ModeCloudProfile {
+		m.cloudActive = !m.cloudActive
+		m.outputMode = false
+		m.mode = ModeNormal
+		if m.cloudActive && m.cloudStatus == "" {
+			m.cloudStatus = "Cloud tab ready; no AWS calls run until you choose an action"
+		}
+		return m, nil
+	}
+
+	if m.cloudActive || m.mode == ModeCloudInput || m.mode == ModeCloudRunning || m.mode == ModeCloudChoice || m.mode == ModeCloudConfirm || m.mode == ModeCloudProfile {
+		return m.handleCloudKey(key)
 	}
 
 	if m.mode == ModeNoProject {
@@ -1074,6 +1214,612 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) isTextInputMode() bool {
+	return m.mode == ModeEdit || m.mode == ModeNewTest || m.mode == ModeFilter || m.mode == ModeCloudInput
+}
+
+// ─── Cloud tab actions ───────────────────────────────────────────────────────
+
+func (m Model) handleCloudKey(key string) (tea.Model, tea.Cmd) {
+	if m.mode == ModeCloudRunning {
+		if key == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	if m.mode == ModeCloudInput {
+		switch key {
+		case "enter":
+			return m.submitCloudInput()
+		case "esc":
+			m.mode = ModeNormal
+			m.cloudInputKind = CloudInputNone
+			m.textInput.Blur()
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.textInput, cmd = m.textInput.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+			return m, cmd
+		}
+	}
+	if m.mode == ModeCloudChoice {
+		switch key {
+		case "z", "Z":
+			return m.runCloudDownload(false)
+		case "x", "X":
+			return m.runCloudDownload(true)
+		case "esc":
+			m.mode = ModeNormal
+			return m, nil
+		}
+		return m, nil
+	}
+	if m.mode == ModeCloudConfirm {
+		switch key {
+		case "enter":
+			return m.runCloudDeploy()
+		case "esc":
+			m.mode = ModeNormal
+			m.cloudConfirmKind = CloudConfirmNone
+			return m, nil
+		}
+		return m, nil
+	}
+	if m.mode == ModeCloudProfile {
+		switch {
+		case matchKey(key, m.keys.cloud):
+			m.cloudActive = false
+			m.mode = ModeNormal
+			return m, nil
+		case key == "esc":
+			m.mode = ModeNormal
+			return m, nil
+		case matchKey(key, m.keys.up):
+			m.cloudProfileCursor--
+			m.clampCloudProfileCursor()
+			return m, nil
+		case matchKey(key, m.keys.down):
+			m.cloudProfileCursor++
+			m.clampCloudProfileCursor()
+			return m, nil
+		case matchKey(key, m.keys.confirm):
+			return m.submitCloudProfileChoice()
+		}
+		return m, nil
+	}
+
+	switch {
+	case matchKey(key, m.keys.cloud):
+		m.cloudActive = false
+		m.mode = ModeNormal
+		return m, nil
+	case matchKey(key, m.keys.quit) || key == "ctrl+c":
+		if m.apiServer != nil {
+			m.apiServer.Stop()
+		}
+		return m, tea.Quit
+	case matchKey(key, m.keys.up):
+		m.cloudCursor--
+		m.clampCloudCursor()
+		return m, nil
+	case matchKey(key, m.keys.down):
+		m.cloudCursor++
+		m.clampCloudCursor()
+		return m, nil
+	case key == "l" || key == "L":
+		return m.openCloudProfilePicker(CloudProfileLogin)
+	case key == "r":
+		m.mode = ModeCloudRunning
+		m.cloudStatus = "Listing Lambda functions"
+		return m, m.cloudListCmd()
+	case key == "p":
+		return m.openCloudProfilePicker(CloudProfileSelect)
+	case key == "R":
+		return m.openCloudInput(CloudInputRegion, "AWS region", m.cloudRegion)
+	case key == "m":
+		return m.mapCloudFunction()
+	case key == "d":
+		fn := m.selectedCloudFunction()
+		if fn == nil {
+			m.cloudStatus = "Select or refresh an AWS Lambda before downloading"
+			m.cloudOutputIsErr = true
+			return m, nil
+		}
+		if m.cfg == nil || strings.TrimSpace(m.cfg.AWS.DownloadDir) == "" {
+			return m.openCloudInput(CloudInputDownloadBaseDir, "Lambda download parent directory", defaultCloudDownloadBaseDir())
+		}
+		m.cloudPendingPath = m.defaultDownloadDir(fn.Name)
+		m.mode = ModeCloudChoice
+		return m, nil
+	case key == "u":
+		return m.prepareCloudDeploy(CloudConfirmDeployAuto, "")
+	case key == "z":
+		return m.openCloudInput(CloudInputDeployZip, "Deployment zip path", "function.zip")
+	}
+	return m, nil
+}
+
+func (m Model) openCloudInput(kind CloudInputKind, placeholder, value string) (tea.Model, tea.Cmd) {
+	m.cloudInputKind = kind
+	m.textInput.Reset()
+	m.textInput.Placeholder = placeholder
+	m.textInput.SetValue(value)
+	m.textInput.Focus()
+	m.mode = ModeCloudInput
+	return m, textinput.Blink
+}
+
+func (m Model) submitCloudInput() (tea.Model, tea.Cmd) {
+	val := strings.TrimSpace(m.textInput.Value())
+	m.textInput.Blur()
+	switch m.cloudInputKind {
+	case CloudInputProfile:
+		m.cloudProfile = val
+		m.mode = ModeNormal
+		m.cloudStatus = "AWS CLI profile set for this session"
+	case CloudInputSetupProfile:
+		if val == "" {
+			m.mode = ModeNormal
+			return m, nil
+		}
+		m.cloudProfile = val
+		m.cloudStatus = "Configuring AWS SSO profile " + val
+		m.mode = ModeCloudRunning
+		m.cloudInputKind = CloudInputNone
+		return m, m.cloudConfigureSSOCmd(val)
+	case CloudInputRegion:
+		if val == "" {
+			val = "us-east-1"
+		}
+		m.cloudRegion = val
+		m.mode = ModeNormal
+		m.cloudStatus = "AWS region set for this session"
+	case CloudInputDownloadBaseDir:
+		if val == "" {
+			m.mode = ModeNormal
+			return m, nil
+		}
+		base := expandPath(val)
+		if m.cfg == nil {
+			m.cfg = config.Default()
+		}
+		m.cfg.AWS.DownloadDir = base
+		if err := config.Save(m.cfg); err != nil {
+			m.mode = ModeNormal
+			m.cloudStatus = "Could not save download directory: " + err.Error()
+			m.cloudOutputIsErr = true
+			return m, nil
+		}
+		if fn := m.selectedCloudFunction(); fn != nil {
+			m.cloudPendingPath = filepath.Join(base, fn.Name)
+			m.mode = ModeCloudChoice
+			m.cloudStatus = "Saved download directory to config"
+			m.cloudOutputIsErr = false
+			return m, nil
+		}
+		m.mode = ModeNormal
+		m.cloudStatus = "Saved download directory to config"
+	case CloudInputDownloadDir:
+		if val == "" {
+			m.mode = ModeNormal
+			return m, nil
+		}
+		m.cloudPendingPath = expandPath(val)
+		m.mode = ModeCloudChoice
+	case CloudInputDeployZip:
+		if val == "" {
+			m.mode = ModeNormal
+			return m, nil
+		}
+		return m.prepareCloudDeploy(CloudConfirmDeployZip, expandPath(val))
+	}
+	m.cloudInputKind = CloudInputNone
+	return m, nil
+}
+
+func (m Model) cloudInputTitle() string {
+	switch m.cloudInputKind {
+	case CloudInputProfile:
+		return "AWS CLI profile name"
+	case CloudInputSetupProfile:
+		return "New SSO profile name"
+	case CloudInputRegion:
+		return "AWS region"
+	case CloudInputDownloadBaseDir:
+		return "Lambda download parent directory"
+	case CloudInputDownloadDir:
+		return "Download directory"
+	case CloudInputDeployZip:
+		return "Deployment zip path"
+	}
+	return "Cloud input"
+}
+
+func (m *Model) clampCloudCursor() {
+	if len(m.cloudFunctions) == 0 {
+		m.cloudCursor = 0
+		return
+	}
+	if m.cloudCursor < 0 {
+		m.cloudCursor = 0
+	}
+	if m.cloudCursor >= len(m.cloudFunctions) {
+		m.cloudCursor = len(m.cloudFunctions) - 1
+	}
+}
+
+func (m *Model) clampCloudProfileCursor() {
+	max := len(m.cloudProfiles) + 2
+	if m.cloudProfileCursor < 0 {
+		m.cloudProfileCursor = 0
+	}
+	if m.cloudProfileCursor > max {
+		m.cloudProfileCursor = max
+	}
+}
+
+func (m Model) openCloudProfilePicker(intent CloudProfileIntent) (tea.Model, tea.Cmd) {
+	m.cloudProfileIntent = intent
+	m.mode = ModeCloudRunning
+	m.cloudStatus = "Loading AWS CLI profiles"
+	return m, m.cloudProfilesCmd()
+}
+
+func (m Model) cloudProfilesCmd() tea.Cmd {
+	client := m.awsClient(m.cloudProfile, m.cloudRegion)
+	return func() tea.Msg {
+		profiles, err := client.ListProfileInfo(context.Background())
+		return cloudProfilesMsg{profiles: profiles, err: err}
+	}
+}
+
+func (m Model) submitCloudProfileChoice() (tea.Model, tea.Cmd) {
+	idx := m.cloudProfileCursor
+	if idx < len(m.cloudProfiles) {
+		profile := m.cloudProfiles[idx]
+		m.cloudProfile = profile.Name
+		if m.cloudProfileIntent == CloudProfileLogin {
+			if !profile.SSO {
+				m.mode = ModeNormal
+				m.cloudOutputIsErr = false
+				m.cloudStatus = fmt.Sprintf("%q is not an SSO profile", profile.Name)
+				m.cloudOutput = "This profile does not need aws sso login. Use it directly, or choose '+ Configure new SSO profile' to create an SSO profile."
+				return m, nil
+			}
+			m.mode = ModeCloudRunning
+			m.cloudStatus = "Running aws sso login for " + profile.Name
+			return m, m.cloudLoginCmd()
+		}
+		m.mode = ModeNormal
+		m.cloudStatus = "AWS CLI profile set to " + profile.Name
+		m.cloudOutput = ""
+		m.cloudOutputIsErr = false
+		return m, nil
+	}
+
+	special := idx - len(m.cloudProfiles)
+	switch special {
+	case 0:
+		return m.openCloudInput(CloudInputSetupProfile, "New SSO profile name", defaultSetupProfileName(m.cloudProfiles))
+	case 1:
+		return m.openCloudInput(CloudInputProfile, "AWS CLI profile name", m.cloudProfile)
+	default:
+		m.mode = ModeNormal
+		return m, nil
+	}
+}
+
+func defaultSetupProfileName(profiles []awscli.Profile) string {
+	base := "sso"
+	used := map[string]bool{}
+	for _, p := range profiles {
+		used[p.Name] = true
+	}
+	if !used[base] {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+func (m Model) selectedCloudFunction() *awscli.Function {
+	if len(m.cloudFunctions) == 0 || m.cloudCursor < 0 || m.cloudCursor >= len(m.cloudFunctions) {
+		return nil
+	}
+	return &m.cloudFunctions[m.cloudCursor]
+}
+
+func (m Model) awsClient(profile, region string) awscli.Client {
+	cli := "aws"
+	if m.cfg != nil && m.cfg.AWS.CLI != "" {
+		cli = m.cfg.AWS.CLI
+	}
+	return awscli.Client{CLI: cli, Profile: profile, Region: region}
+}
+
+func (m Model) cloudLoginCmd() tea.Cmd {
+	client := m.awsClient(m.cloudProfile, m.cloudRegion)
+	return func() tea.Msg {
+		out, err := client.SSOLogin(context.Background())
+		return cloudDoneMsg{message: "AWS SSO login finished for " + profileLabel(m.cloudProfile), output: out, err: simplifyAWSError(err)}
+	}
+}
+
+func (m Model) cloudConfigureSSOCmd(profile string) tea.Cmd {
+	client := m.awsClient(profile, m.cloudRegion)
+	cmd := exec.Command(client.CLI, "configure", "sso", "--profile", profile)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return cloudDoneMsg{err: err}
+		}
+		profiles, listErr := client.ListProfileInfo(context.Background())
+		if listErr != nil {
+			return cloudDoneMsg{message: "AWS SSO profile configured", err: nil}
+		}
+		return cloudProfilesMsg{profiles: profiles}
+	})
+}
+
+func (m Model) cloudListCmd() tea.Cmd {
+	client := m.awsClient(m.cloudProfile, m.cloudRegion)
+	return func() tea.Msg {
+		fns, err := client.ListFunctions(context.Background())
+		return cloudFunctionsMsg{functions: fns, err: err}
+	}
+}
+
+func (m Model) mapCloudFunction() (tea.Model, tea.Cmd) {
+	local := m.selectedFunction()
+	remote := m.selectedCloudFunction()
+	if local == nil || remote == nil {
+		m.cloudStatus = "Select both a local function and an AWS Lambda before mapping"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	idx := m.selectedFnIdx
+	if !m.fnLocked {
+		idx = m.fnCursor
+	}
+	if idx < 0 || idx >= len(m.proj.Functions) {
+		m.cloudStatus = "No local function selected"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	m.proj.Functions[idx].AWSFunctionName = remote.Name
+	m.proj.Functions[idx].AWSRegion = m.cloudRegion
+	m.proj.Functions[idx].AWSProfile = m.cloudProfile
+	if err := project.Save(m.proj); err != nil {
+		m.cloudStatus = "Could not save AWS mapping: " + err.Error()
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	m.cloudStatus = "Mapped " + local.Name + " to " + remote.Name
+	m.cloudOutputIsErr = false
+	return m, nil
+}
+
+func (m Model) defaultDownloadDir(functionName string) string {
+	base := ""
+	if m.cfg != nil {
+		base = m.cfg.AWS.DownloadDir
+	}
+	if base == "" {
+		base = defaultCloudDownloadBaseDir()
+	}
+	return filepath.Join(expandPath(base), functionName)
+}
+
+func defaultCloudDownloadBaseDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "lambit-lambdas"
+	}
+	return filepath.Join(home, "lambit-lambdas")
+}
+
+func (m Model) runCloudDownload(extract bool) (tea.Model, tea.Cmd) {
+	fn := m.selectedCloudFunction()
+	if fn == nil {
+		m.mode = ModeNormal
+		m.cloudStatus = "No AWS Lambda selected"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	targetDir := m.cloudPendingPath
+	if targetDir == "" {
+		targetDir = m.defaultDownloadDir(fn.Name)
+	}
+	zipPath := filepath.Join(targetDir, fn.Name+".zip")
+	client := m.awsClient(m.cloudProfile, m.cloudRegion)
+	m.mode = ModeCloudRunning
+	m.cloudStatus = "Downloading " + fn.Name
+	return m, func() tea.Msg {
+		if extract {
+			empty, err := archiveutil.EmptyDir(targetDir)
+			if err != nil {
+				return cloudDoneMsg{err: err}
+			}
+			if !empty {
+				return cloudDoneMsg{err: fmt.Errorf("download directory is not empty: %s", targetDir)}
+			}
+		}
+		url, err := client.CodeURL(context.Background(), fn.Name)
+		if err != nil {
+			return cloudDoneMsg{err: err}
+		}
+		if err := awscli.DownloadURL(context.Background(), url, zipPath); err != nil {
+			return cloudDoneMsg{err: err}
+		}
+		meta := fmt.Sprintf("function_name = %q\nprofile = %q\nregion = %q\nruntime = %q\nhandler = %q\nlast_modified = %q\n", fn.Name, m.cloudProfile, m.cloudRegion, fn.Runtime, fn.Handler, fn.LastModified)
+		_ = os.WriteFile(filepath.Join(targetDir, "lambit-aws.toml"), []byte(meta), 0644)
+		message := "Downloaded zip to " + zipPath
+		if extract {
+			if err := archiveutil.ExtractZip(zipPath, targetDir); err != nil {
+				return cloudDoneMsg{err: err}
+			}
+			message = "Downloaded and extracted to " + targetDir
+		}
+		return cloudDoneMsg{message: message, output: zipPath}
+	}
+}
+
+func (m Model) prepareCloudDeploy(kind CloudConfirmKind, zipPath string) (tea.Model, tea.Cmd) {
+	fn := m.selectedFunction()
+	if fn == nil {
+		m.cloudStatus = "Select a local function before deploying"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	target := m.deployTarget(fn)
+	if target == "" {
+		m.cloudStatus = "Map or select an AWS Lambda before deploying"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	m.cloudConfirmKind = kind
+	m.cloudConfirmTarget = target
+	m.cloudPendingPath = zipPath
+	m.mode = ModeCloudConfirm
+	return m, nil
+}
+
+func (m Model) runCloudDeploy() (tea.Model, tea.Cmd) {
+	fn := m.selectedFunction()
+	if fn == nil {
+		m.mode = ModeNormal
+		m.cloudStatus = "No local function selected"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	target := m.cloudConfirmTarget
+	profile := m.deployProfile(fn)
+	region := m.deployRegion(fn)
+	zipPath := m.cloudPendingPath
+	kind := m.cloudConfirmKind
+	runtimeName := ""
+	if m.runtime != nil {
+		runtimeName = m.runtime.Name()
+	}
+	root := fnRoot(m.proj.Path, fn)
+	client := m.awsClient(profile, region)
+	m.mode = ModeCloudRunning
+	m.cloudStatus = "Deploying to " + target
+	return m, func() tea.Msg {
+		var log string
+		var err error
+		if kind == CloudConfirmDeployAuto {
+			zipPath, log, err = lambdapkg.Build(runtimeName, root, *fn)
+			if err != nil {
+				return cloudDoneMsg{output: log, err: err}
+			}
+		}
+		if zipPath == "" {
+			return cloudDoneMsg{err: fmt.Errorf("deployment zip path is empty")}
+		}
+		out, err := client.UpdateFunctionCode(context.Background(), target, zipPath)
+		if log != "" && out != "" {
+			out = log + "\n" + out
+		} else if log != "" {
+			out = log
+		}
+		return cloudDoneMsg{message: "Deployment submitted to " + target, output: out, err: err}
+	}
+}
+
+func (m Model) deployTarget(fn *project.Function) string {
+	if remote := m.selectedCloudFunction(); remote != nil {
+		return remote.Name
+	}
+	if fn != nil {
+		if fn.AWSFunctionName != "" {
+			return fn.AWSFunctionName
+		}
+		return m.detectedAWSName(fn)
+	}
+	return ""
+}
+
+func (m Model) deployProfile(fn *project.Function) string {
+	if fn != nil && fn.AWSProfile != "" {
+		return fn.AWSProfile
+	}
+	return m.cloudProfile
+}
+
+func (m Model) deployRegion(fn *project.Function) string {
+	if fn != nil && fn.AWSRegion != "" {
+		return fn.AWSRegion
+	}
+	if m.cloudRegion != "" {
+		return m.cloudRegion
+	}
+	return "us-east-1"
+}
+
+func (m Model) detectedAWSName(fn *project.Function) string {
+	if fn == nil {
+		return ""
+	}
+	for _, det := range m.cloudDetected {
+		if det.Handler != "" && strings.EqualFold(det.Handler, fn.Handler) {
+			return det.FunctionName
+		}
+		if det.FunctionName != "" && strings.EqualFold(det.FunctionName, fn.Name) {
+			return det.FunctionName
+		}
+	}
+	return ""
+}
+
+func expandPath(path string) string {
+	if path == "" || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
+func profileLabel(profile string) string {
+	if strings.TrimSpace(profile) == "" {
+		return "default AWS CLI resolution"
+	}
+	return profile
+}
+
+func cloudSetupHint(cli string) string {
+	if strings.TrimSpace(cli) == "" {
+		cli = "aws"
+	}
+	return "Install AWS CLI v2 and ensure " + cli + " is on PATH, or set [aws].cli in lambit config. After installing, use '+ Configure new SSO profile' from the Cloud profile picker."
+}
+
+func simplifyAWSError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "Missing the following required SSO configuration values") {
+		return fmt.Errorf("selected profile is not configured for SSO; choose '+ Configure new SSO profile' or use a different profile")
+	}
+	if strings.Contains(msg, "The config profile") && strings.Contains(msg, "could not be found") {
+		return fmt.Errorf("AWS CLI profile not found; choose an existing profile or configure a new SSO profile")
+	}
+	return err
 }
 
 // ─── Cursor movement ──────────────────────────────────────────────────────────

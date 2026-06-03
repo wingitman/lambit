@@ -35,6 +35,7 @@ type Keybinds struct {
 	CopyCurl    string `toml:"copy_curl"`
 	GotoSource  string `toml:"goto_source"`
 	GotoConfig  string `toml:"goto_config"`
+	Cloud       string `toml:"cloud"`
 	ShowUpdates string `toml:"show_updates"`
 }
 
@@ -51,10 +52,21 @@ type Updates struct {
 	Terminal      string `toml:"terminal"`
 }
 
+// AWS holds optional cloud workflow preferences. Lambit never reads AWS
+// credentials directly; these values only shape AWS CLI commands after the user
+// opens the Cloud tab.
+type AWS struct {
+	CLI         string `toml:"cli"`
+	Profile     string `toml:"profile"`
+	Region      string `toml:"region"`
+	DownloadDir string `toml:"download_dir"`
+}
+
 // Config is the root config struct.
 type Config struct {
 	Keybinds Keybinds `toml:"keybinds"`
 	Apps     Apps     `toml:"apps"`
+	AWS      AWS      `toml:"aws"`
 	Updates  Updates  `toml:"updates"`
 }
 
@@ -85,10 +97,13 @@ var keybindEntries = []struct{ key, comment string }{
 	{"copy_curl", "copy as curl command (using API server when running)"},
 	{"goto_source", "open handler/.cs source file in $EDITOR at the method definition"},
 	{"goto_config", "open .lambit.toml in $EDITOR at the relevant entry"},
+	{"cloud", "open cloud/AWS tab"},
 	{"show_updates", "show update history and installers"},
 }
 
 var appEntries = []string{"editor"}
+
+var awsEntries = []string{"cli", "profile", "region", "download_dir"}
 
 var updateEntries = []string{"disable_checks", "current_commit", "repo_path", "terminal"}
 
@@ -121,9 +136,16 @@ func Default() *Config {
 			CopyCurl:    "Y",
 			GotoSource:  "g",
 			GotoConfig:  "G",
+			Cloud:       "A",
 			ShowUpdates: "U",
 		},
 		Apps: Apps{Editor: ""},
+		AWS: AWS{
+			CLI:         "aws",
+			Profile:     "",
+			Region:      "us-east-1",
+			DownloadDir: "",
+		},
 		Updates: Updates{
 			DisableChecks: false,
 			CurrentCommit: "",
@@ -256,8 +278,17 @@ func applyKeybindDefaults(cfg *Config) {
 	if cfg.Keybinds.GotoConfig == "" {
 		cfg.Keybinds.GotoConfig = d.GotoConfig
 	}
+	if cfg.Keybinds.Cloud == "" {
+		cfg.Keybinds.Cloud = d.Cloud
+	}
 	if cfg.Keybinds.ShowUpdates == "" {
 		cfg.Keybinds.ShowUpdates = d.ShowUpdates
+	}
+	if cfg.AWS.CLI == "" {
+		cfg.AWS.CLI = Default().AWS.CLI
+	}
+	if cfg.AWS.Region == "" {
+		cfg.AWS.Region = Default().AWS.Region
 	}
 }
 
@@ -273,6 +304,11 @@ func needsMigration(path string) bool {
 		}
 	}
 	for _, key := range appEntries {
+		if !fileContainsKey(content, key) {
+			return true
+		}
+	}
+	for _, key := range awsEntries {
 		if !fileContainsKey(content, key) {
 			return true
 		}
@@ -307,6 +343,19 @@ func WriteDefault(path string) error {
 	return os.WriteFile(path, []byte(buildTOML(Default())), 0644)
 }
 
+// Save writes cfg to the global lambit config path, creating the config
+// directory if necessary.
+func Save(cfg *Config) error {
+	if cfg == nil {
+		cfg = Default()
+	}
+	applyKeybindDefaults(cfg)
+	if err := os.MkdirAll(ConfigDir(), 0755); err != nil {
+		return err
+	}
+	return writeMigrated(ConfigPath(), cfg)
+}
+
 // RecordUpdateMetadata stores the installed commit and source repo path without
 // changing user-facing preferences.
 func RecordUpdateMetadata(commit, repoPath string) error {
@@ -320,10 +369,7 @@ func RecordUpdateMetadata(commit, repoPath string) error {
 	if repoPath != "" {
 		cfg.Updates.RepoPath = repoPath
 	}
-	if err := os.MkdirAll(ConfigDir(), 0755); err != nil {
-		return err
-	}
-	return writeMigrated(ConfigPath(), cfg)
+	return Save(cfg)
 }
 
 func buildTOML(cfg *Config) string {
@@ -346,6 +392,11 @@ func buildTOML(cfg *Config) string {
 	}
 	out += "\n[apps]\n" +
 		"editor = " + quote(cfg.Apps.Editor) + "   # leave empty to use $EDITOR env var\n\n" +
+		"[aws]\n" +
+		"cli = " + quote(cfg.AWS.CLI) + "   # AWS CLI executable used by the Cloud tab\n" +
+		"profile = " + quote(cfg.AWS.Profile) + "   # default AWS profile; empty uses AWS CLI default resolution\n" +
+		"region = " + quote(cfg.AWS.Region) + "   # default AWS region for Lambda cloud actions\n" +
+		"download_dir = " + quote(cfg.AWS.DownloadDir) + "   # parent directory for downloaded Lambda packages\n\n" +
 		"[updates]\n" +
 		"disable_checks = " + boolStr(u.DisableChecks) + "   # true disables startup update checks\n" +
 		"current_commit = " + quote(u.CurrentCommit) + "   # installed app commit, maintained by lambit\n" +
@@ -381,6 +432,7 @@ func keybindValues(k *Keybinds) map[string]string {
 		"copy_curl":    k.CopyCurl,
 		"goto_source":  k.GotoSource,
 		"goto_config":  k.GotoConfig,
+		"cloud":        k.Cloud,
 		"show_updates": k.ShowUpdates,
 	}
 }

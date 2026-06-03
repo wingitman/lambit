@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/wingitman/lambit/internal/awscli"
 	"github.com/wingitman/lambit/internal/project"
 	"github.com/wingitman/lambit/internal/ui"
 )
@@ -38,6 +39,8 @@ func (m Model) View() string {
 		b.WriteString(m.renderUpdatePrompt())
 	case ModeUpdates:
 		b.WriteString(m.renderUpdatesScreen())
+	case ModeCloudRunning, ModeCloudChoice, ModeCloudConfirm, ModeCloudInput, ModeCloudProfile:
+		b.WriteString(m.renderMain())
 	default:
 		b.WriteString(m.renderMain())
 	}
@@ -57,7 +60,12 @@ func (m Model) renderHeader() string {
 		projectName = m.proj.Name
 	}
 
-	left := ui.StylePrimary.Render(projectName) +
+	tab := ui.StyleMuted.Render(" [Local]")
+	if m.cloudActive {
+		tab = ui.StyleAccent.Render(" [Cloud]")
+	}
+
+	left := ui.StylePrimary.Render(projectName) + tab +
 		ui.StyleMuted.Render("  ("+runtimeLabel+")")
 
 	delby := lipgloss.NewStyle().Foreground(ui.ColorBrand1).Bold(true).Render("delby")
@@ -78,6 +86,10 @@ func (m Model) renderHeader() string {
 // ─── Main layout ──────────────────────────────────────────────────────────────
 
 func (m Model) renderMain() string {
+	if m.cloudActive {
+		return m.renderCloudMain()
+	}
+
 	leftW := m.computeLeftPanelWidth()
 	if m.width < 64 {
 		leftW = m.width / 2
@@ -474,6 +486,224 @@ func (m Model) renderOutputPane(width, height int) []string {
 	return lines
 }
 
+// ─── Cloud tab ────────────────────────────────────────────────────────────────
+
+func (m Model) renderCloudMain() string {
+	leftW := m.computeLeftPanelWidth()
+	if m.width < 64 {
+		leftW = m.width / 2
+	}
+	rightW := m.width - leftW - 1
+	contentH := m.leftPanelHeight()
+	leftLines := m.renderCloudList(leftW, contentH)
+	rightLines := m.renderCloudDetail(rightW, contentH)
+
+	var b strings.Builder
+	maxLines := len(leftLines)
+	if len(rightLines) > maxLines {
+		maxLines = len(rightLines)
+	}
+	for i := 0; i < maxLines; i++ {
+		l := ""
+		if i < len(leftLines) {
+			l = leftLines[i]
+		}
+		r := ""
+		if i < len(rightLines) {
+			r = rightLines[i]
+		}
+		if lw := lipgloss.Width(l); lw < leftW {
+			l += strings.Repeat(" ", leftW-lw)
+		}
+		b.WriteString(l)
+		b.WriteString(ui.StyleMuted.Render("│"))
+		b.WriteString(r)
+		b.WriteString("\n")
+	}
+	b.WriteString(ui.StyleMuted.Render(strings.Repeat("─", clamp(m.width, 1, m.width))) + "\n")
+	b.WriteString(m.renderCloudStatusBar())
+	return b.String()
+}
+
+func (m Model) renderCloudList(width, height int) []string {
+	var lines []string
+	profile := m.cloudProfile
+	if profile == "" {
+		profile = "default resolution"
+	}
+	lines = append(lines, ui.StyleSectionTitle.Render("  AWS Lambdas"))
+	lines = append(lines, ui.StyleMuted.Render("  profile: "+truncate(profile, width-13)))
+	lines = append(lines, ui.StyleMuted.Render("  region: "+truncate(m.cloudRegion, width-12)))
+	lines = append(lines, "")
+	if len(m.cloudFunctions) == 0 {
+		lines = append(lines, ui.StyleMuted.Render("  (press r to list functions)"))
+	} else {
+		for i, fn := range m.cloudFunctions {
+			cursor := "  "
+			style := ui.StyleNormal
+			if i == m.cloudCursor {
+				cursor = " ▶"
+				style = ui.StyleSelected
+			}
+			lines = append(lines, cursor+" "+style.Render(truncate(fn.Name, width-4)))
+		}
+	}
+	return padLines(lines, height)
+}
+
+func (m Model) renderCloudDetail(width, height int) []string {
+	var lines []string
+	lines = append(lines, ui.StyleSectionTitle.Render("  Cloud Actions"))
+	if m.mode == ModeCloudRunning {
+		lines = append(lines, ui.StyleAccent.Render("  Working..."))
+		lines = append(lines, ui.StyleMuted.Render("  AWS CLI operation is running."))
+		return padLines(lines, height)
+	}
+	if m.mode == ModeCloudInput {
+		lines = append(lines, ui.StyleAccent.Render("  "+m.cloudInputTitle()))
+		lines = append(lines, "  "+m.textInput.View())
+		lines = append(lines, "")
+		lines = append(lines, ui.StyleMuted.Render("  Enter to continue · Esc to cancel"))
+		return padLines(lines, height)
+	}
+	if m.mode == ModeCloudProfile {
+		return m.renderCloudProfilePicker(width, height)
+	}
+	if m.mode == ModeCloudChoice {
+		lines = append(lines, ui.StyleAccent.Render("  Download selected Lambda"))
+		lines = append(lines, ui.StyleMuted.Render("  [z] save zip only"))
+		lines = append(lines, ui.StyleMuted.Render("  [x] save zip and extract"))
+		lines = append(lines, ui.StyleMuted.Render("  [Esc] cancel"))
+		return padLines(lines, height)
+	}
+	if m.mode == ModeCloudConfirm {
+		lines = append(lines, ui.StyleError.Render("  Confirm AWS deployment"))
+		lines = append(lines, "")
+		fn := m.selectedFunction()
+		local := "(none)"
+		if fn != nil {
+			local = fn.Name
+		}
+		lines = append(lines, ui.StyleMuted.Render("  local:  ")+ui.StyleResult.Render(truncate(local, width-12)))
+		lines = append(lines, ui.StyleMuted.Render("  target: ")+ui.StyleResult.Render(truncate(m.cloudConfirmTarget, width-12)))
+		lines = append(lines, ui.StyleMuted.Render("  region: ")+ui.StyleResult.Render(truncate(m.deployRegion(fn), width-12)))
+		profile := m.deployProfile(fn)
+		if profile == "" {
+			profile = "default resolution"
+		}
+		lines = append(lines, ui.StyleMuted.Render("  profile: ")+ui.StyleResult.Render(truncate(profile, width-13)))
+		if m.cloudPendingPath != "" {
+			lines = append(lines, ui.StyleMuted.Render("  zip:    ")+ui.StyleResult.Render(truncate(m.cloudPendingPath, width-12)))
+		}
+		lines = append(lines, "")
+		lines = append(lines, ui.StyleError.Render("  Enter updates AWS Lambda code"))
+		lines = append(lines, ui.StyleMuted.Render("  Esc cancels"))
+		return padLines(lines, height)
+	}
+
+	if fn := m.selectedCloudFunction(); fn != nil {
+		lines = append(lines, ui.StylePrimary.Render("  "+truncate(fn.Name, width-3)))
+		if fn.Runtime != "" {
+			lines = append(lines, ui.StyleMuted.Render("  runtime: "+truncate(fn.Runtime, width-13)))
+		}
+		if fn.Handler != "" {
+			lines = append(lines, ui.StyleMuted.Render("  handler: "+truncate(fn.Handler, width-13)))
+		}
+		if fn.LastModified != "" {
+			lines = append(lines, ui.StyleMuted.Render("  updated: "+truncate(fn.LastModified, width-13)))
+		}
+	} else {
+		lines = append(lines, ui.StyleMuted.Render("  No AWS Lambda selected."))
+	}
+	lines = append(lines, "")
+	if local := m.selectedFunction(); local != nil {
+		mapped := local.AWSFunctionName
+		if mapped == "" {
+			mapped = m.detectedAWSName(local)
+		}
+		if mapped == "" {
+			mapped = "(unmapped)"
+		}
+		lines = append(lines, ui.StyleAccent.Render("  Local selection:"))
+		lines = append(lines, ui.StyleMuted.Render("  "+local.Name+" → ")+ui.StyleResult.Render(truncate(mapped, width-lipgloss.Width(local.Name)-7)))
+	} else {
+		lines = append(lines, ui.StyleMuted.Render("  No local function selected."))
+	}
+	if m.cloudStatus != "" {
+		lines = append(lines, "")
+		style := ui.StyleSuccess
+		if m.cloudOutputIsErr {
+			style = ui.StyleError
+		}
+		lines = append(lines, style.Render("  "+truncate(m.cloudStatus, width-3)))
+	}
+	if m.cloudOutput != "" {
+		lines = append(lines, "")
+		for _, l := range wrapString(m.cloudOutput, width-3) {
+			lines = append(lines, "  "+ui.StyleResult.Render(l))
+			if len(lines) >= height {
+				break
+			}
+		}
+	}
+	return padLines(lines, height)
+}
+
+func (m Model) renderCloudProfilePicker(width, height int) []string {
+	var lines []string
+	title := "Select AWS CLI profile"
+	if m.cloudProfileIntent == CloudProfileLogin {
+		title = "SSO login profile"
+	}
+	lines = append(lines, ui.StyleSectionTitle.Render("  "+title))
+	lines = append(lines, ui.StyleMuted.Render("  SSO login uses a CLI profile, not an email/account ID."))
+	lines = append(lines, "")
+	for i, profile := range m.cloudProfiles {
+		label := profile.Name + "  " + cloudProfileKind(profile)
+		lines = append(lines, m.renderCloudChoiceRow(i, label, width))
+	}
+	if len(m.cloudProfiles) == 0 {
+		lines = append(lines, ui.StyleMuted.Render("  (no AWS CLI profiles found)"))
+	}
+	base := len(m.cloudProfiles)
+	lines = append(lines, "")
+	lines = append(lines, m.renderCloudChoiceRow(base, "+ Configure new SSO profile", width))
+	lines = append(lines, m.renderCloudChoiceRow(base+1, "Manual profile name", width))
+	lines = append(lines, m.renderCloudChoiceRow(base+2, "Cancel", width))
+	lines = append(lines, "")
+	lines = append(lines, ui.StyleMuted.Render("  Enter to select · Esc to cancel"))
+	return padLines(lines, height)
+}
+
+func (m Model) renderCloudChoiceRow(idx int, label string, width int) string {
+	cursor := "  "
+	style := ui.StyleNormal
+	if m.cloudProfileCursor == idx {
+		cursor = " ▶"
+		style = ui.StyleSelected
+	}
+	return cursor + " " + style.Render(truncate(label, width-4))
+}
+
+func cloudProfileKind(profile awscli.Profile) string {
+	if profile.SSO {
+		return ui.StyleSuccess.Render("sso")
+	}
+	if profile.Configured {
+		return ui.StyleMuted.Render("non-sso")
+	}
+	return ui.StyleMuted.Render("static/env")
+}
+
+func (m Model) renderCloudStatusBar() string {
+	k := m.keys
+	row := "[" + k.cloud + "]Local  [r]Refresh  [l]SSO Login  [p]Profile  [R]Region  [m]Map  [d]Download  [u]Package+Deploy  [z]Deploy Zip  [" + k.options + "]Config  [" + k.quit + "]Quit"
+	if len(row) > m.width {
+		row = row[:m.width-1]
+	}
+	return ui.StyleStatusBar.Render("  "+row) + "\n"
+}
+
 // ─── Results pane ─────────────────────────────────────────────────────────────
 
 func (m Model) renderResults(width int) string {
@@ -520,6 +750,7 @@ func (m Model) renderNoProject() string {
 	b.WriteString(ui.StyleMuted.Render("  lambit needs a .lambit.toml to know what lambda to work with.") + "\n\n")
 	b.WriteString(ui.StyleAccent.Render("  ["+k.scaffold+"]") +
 		ui.StyleMuted.Render(" Scaffold a .lambit.toml here (auto-detects handlers + tests)") + "\n")
+	b.WriteString(ui.StyleAccent.Render("  ["+k.cloud+"]") + ui.StyleMuted.Render(" Open Cloud tab (AWS login/list/download)") + "\n")
 	b.WriteString(ui.StyleAccent.Render("  ["+k.showUpdates+"]") + ui.StyleMuted.Render(" Show updates") + "\n")
 	b.WriteString(ui.StyleAccent.Render("  ["+k.quit+"]") + ui.StyleMuted.Render(" Quit") + "\n\n")
 	b.WriteString(ui.StyleMuted.Render("  See SPEC.md for details on creating a custom runtime interface.") + "\n")
@@ -722,6 +953,7 @@ func (m Model) renderHelp() string {
 		{"[" + k.copyCurl + "]", "Copy as curl command (uses live API endpoint when server is running)"},
 		{"[" + k.gotoSource + "]", "Open source file in $EDITOR at the method/test definition"},
 		{"[" + k.gotoConfig + "]", "Open .lambit.toml in $EDITOR at the relevant entry"},
+		{"[" + k.cloud + "]", "Open Cloud tab for AWS login, list, download, map, and deploy"},
 		{"[" + k.newTest + "]", "Create a new test case"},
 		{"[" + k.delete + "]", "Delete selected test / model"},
 		{"[" + k.toggleAPI + "]", "Start / stop local HTTP API server"},
@@ -813,6 +1045,7 @@ func (m Model) renderStatusBar() string {
 		"["+k.copyCurl+"]"+m.copyCurlHint(),
 		"["+k.gotoSource+"]"+m.gotoSourceHint(),
 		"["+k.gotoConfig+"]Config",
+		"["+k.cloud+"]Cloud",
 		"["+k.newTest+"]New",
 		"["+k.delete+"]Del",
 		"["+k.toggleAPI+"]API",

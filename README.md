@@ -21,6 +21,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Glo
 - **Live filter / search** across functions, tests, and models with `/`
 - **Clipboard copy** — context-sensitive (`y`) or always-curl (`Y`)
 - **Jump to source** — open the handler or test definition in `$EDITOR` with `g`
+- **Cloud tab** (`A`) — AWS SSO login, Lambda listing, downloads, mapping, and confirmed deployments via AWS CLI
 - Every keybind remappable via a `.toml` config file
 - Scaffold a `.lambit.toml` project file with auto-detected handlers in one keypress
 
@@ -88,6 +89,7 @@ On first run in a new project, lambit will show a **no project file** screen. Pr
 | `Y` | Copy curl command to clipboard |
 | `g` | Open source file in `$EDITOR` at the definition line |
 | `G` | Open `.lambit.toml` in `$EDITOR` at the selected entry |
+| `A` | Open Cloud tab |
 | `s` | Scaffold `.lambit.toml` |
 | `o` | Open global config file in `$EDITOR` |
 | `U` | Show updates, recent changes, and install history commits |
@@ -174,6 +176,29 @@ curl -X POST http://localhost:8080/FunctionHandler/HelloWorld
 
 The port is configurable in `.lambit.toml`. API results update the results strip and benchmark without interrupting the TUI.
 
+### Cloud tab
+
+Press `A` to open the Cloud tab. Lambit does not require AWS login on startup and does not call AWS unless you use this tab.
+
+Cloud actions use the AWS CLI on your `PATH`. If the AWS CLI is missing, Lambit shows setup guidance instead of attempting login.
+
+| Key | Action |
+|-----|--------|
+| `l` | Pick an AWS CLI profile, then run SSO login only for SSO profiles |
+| `r` | List Lambda functions for the current profile/region |
+| `p` | Pick or manually enter an AWS CLI profile for this session |
+| `R` | Set AWS region for this session |
+| `m` | Map selected AWS Lambda to the selected local function and save it in `.lambit.toml` |
+| `d` | Download selected Lambda; choose zip only or zip plus extraction |
+| `u` | Package the selected local function and deploy after confirmation |
+| `z` | Deploy an existing zip after confirmation |
+
+Deployments always show a confirmation screen with the local function, AWS target, profile, region, and zip path before running `aws lambda update-function-code`.
+
+The profile picker lists configured AWS CLI profiles and labels them as `sso`, `non-sso`, or `static/env`. It also includes `+ Configure new SSO profile`, which launches `aws configure sso --profile <name>` interactively. Non-SSO/static profiles can still list and deploy Lambdas if their credentials work; Lambit simply avoids running `aws sso login` for them.
+
+The first time you download a Lambda, Lambit prompts for a parent download directory and stores it in `[aws].download_dir`. Each selected Lambda is downloaded into its own subdirectory under that parent, so downloads do not default into the current Lambit/project repo.
+
 ---
 
 ## Project file (`.lambit.toml`)
@@ -192,6 +217,9 @@ name        = "FunctionHandler"
 handler     = "MyFunction::MyFunction.Function::FunctionHandler"
 description = "Main lambda entry point"
 root        = ""  # optional: subdirectory where the lambda lives (for monorepos)
+aws_function_name = ""  # optional: remembered AWS Lambda target for Cloud tab deployments
+aws_region        = ""  # optional: overrides Cloud tab region for this function
+aws_profile       = ""  # optional: overrides Cloud tab profile for this function
 
 [[functions.tests]]
 name    = "Hello world"
@@ -263,12 +291,19 @@ goto_source  = "g"
 goto_config  = "G"
 scaffold     = "s"
 options      = "o"
+cloud       = "A"
 show_updates = "U"
 help         = "?"
 quit         = "q"
 
 [apps]
 editor = ""   # leave empty to use $EDITOR / $VISUAL, or set e.g. "nvim"
+
+[aws]
+cli = "aws"              # AWS CLI executable used by the Cloud tab
+profile = ""             # default AWS profile; empty uses AWS CLI default resolution
+region = "us-east-1"     # default AWS region for Lambda cloud actions
+download_dir = ""        # parent directory for downloaded Lambda packages
 
 [updates]
 disable_checks = false  # true disables startup update checks

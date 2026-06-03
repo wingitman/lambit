@@ -168,6 +168,9 @@ api_port = 8080
 name        = "FunctionHandler"
 handler     = "MyFunction::MyFunction.Function::FunctionHandler"
 description = "Main lambda entry point"
+aws_function_name = ""  # optional AWS Lambda target used by the Cloud tab
+aws_region        = ""  # optional per-function deployment region
+aws_profile       = ""  # optional per-function deployment profile
 
 [[functions.tests]]
 name    = "Hello world"
@@ -198,6 +201,34 @@ Content-Type: application/json
 The server routes the request body as the lambda payload and returns the
 invocation result as the response body.  This lets you test your lambda
 with `curl`, Postman, or any HTTP client without deploying to AWS.
+
+---
+
+## Cloud Tab
+
+Pressing `[A]` opens the optional Cloud tab. This tab shells out to the AWS CLI
+for SSO login, Lambda listing, Lambda package downloads, and confirmed
+`update-function-code` deployments. Lambit never requires AWS credentials for
+startup or local invocation, and no AWS command runs unless the user chooses a
+Cloud action.
+
+SSO login uses AWS CLI profile names, not AWS usernames, emails, or account IDs.
+The Cloud tab profile picker lists profiles from `aws configure list-profiles`,
+labels profiles that have SSO configuration, and offers `+ Configure new SSO
+profile` to launch `aws configure sso --profile <name>` interactively. If a
+profile is not configured for SSO, Lambit uses it for normal AWS CLI operations
+but does not run `aws sso login` against it.
+
+Lambda downloads use `[aws].download_dir` as a parent directory. If it is empty,
+the Cloud tab prompts for a parent directory and saves it to the global config
+before downloading. Each selected Lambda is written to a function-specific
+subdirectory under that parent.
+
+The optional `aws_function_name`, `aws_region`, and `aws_profile` fields on a
+function remember which AWS Lambda a local handler deploys to. Lambit can also
+detect likely targets from `template.yaml` / `template.yml` and
+`aws-lambda-tools-defaults.json`, but deployment still requires explicit user
+confirmation.
 
 ---
 
