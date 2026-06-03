@@ -10,7 +10,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Glo
 
 ## Features
 
-- Auto-detects **.NET** and **Node.js** AWS Lambda projects
+- Auto-detects **.NET**, **Node.js**, and **Python** AWS Lambda projects
 - Reads handler strings from `template.yaml`, `aws-lambda-tools-defaults.json`, or infers them from `.csproj`
 - Discovers **xUnit `[Fact]` and `[Theory]`** test methods and surfaces them as invocable items (marked `⊕`)
 - Invoke functions with custom JSON payloads or auto-discovered test cases
@@ -186,8 +186,8 @@ Cloud actions use the AWS CLI on your `PATH`. If the AWS CLI is missing, Lambit 
 |-----|--------|
 | `l` | Pick an AWS CLI profile, then run SSO login only for SSO profiles |
 | `r` | List Lambda functions for the current profile/region |
-| `p` | Pick or manually enter an AWS CLI profile for this session |
-| `R` | Set AWS region for this session |
+| `p` | Pick or manually enter an AWS CLI profile and save it to config |
+| `R` | Set AWS region and save it to config |
 | `m` | Map selected AWS Lambda to the selected local function and save it in `.lambit.toml` |
 | `d` | Download selected Lambda; choose zip only or zip plus extraction |
 | `u` | Package the selected local function and deploy after confirmation |
@@ -208,7 +208,7 @@ lambit stores per-project configuration in `.lambit.toml` at the project root. P
 ```toml
 [project]
 name       = "MyFunction"
-runtime    = ""   # leave empty for auto-detect, or "dotnet" / "nodejs"
+runtime    = ""   # leave empty for auto-detect, or "dotnet" / "nodejs" / "python"
 api_port   = 8080
 bench_runs = 10   # iterations for quick-bench (r)
 

@@ -2,8 +2,8 @@
 
 This document describes the `Runtime` interface that lambit uses to detect,
 build, and invoke AWS Lambda functions locally.  If you are using a lambda
-runtime not covered by the built-in `.NET` and `Node.js` implementations,
-you can write your own by implementing this interface.
+runtime not covered by the built-in `.NET`, `Node.js`, and `Python`
+implementations, you can write your own by implementing this interface.
 
 ---
 
@@ -156,12 +156,33 @@ the JSON-serialized result to stdout.
 
 ---
 
+### Python (`python`)
+
+**Detection:** a SAM/CloudFormation template declaring a `python...` runtime,
+or common Python Lambda project files such as `requirements.txt`,
+`lambda_function.py`, `app.py`, or `handler.py`.
+
+**Handler string format:** `<module>.<function>`
+Example: `lambda_function.lambda_handler`
+
+**Build:** skipped for local invocation. Cloud packaging copies the Python
+project into a clean package directory and runs
+`python3 -m pip install -r requirements.txt -t <package-dir>` when
+`requirements.txt` exists.
+
+**Invoke:** runs `python3 -c <runner> <handler> <payload>` from the function
+root. The runner imports the module, deserializes the JSON event, calls the
+handler with `(event, None)` when it accepts two arguments or `(event)` for
+single-argument handlers, and writes the JSON-serialized result to stdout.
+
+---
+
 ## Project File (`.lambit.toml`)
 
 ```toml
 [project]
 name     = "MyFunction"
-runtime  = ""         # leave empty for auto-detect, or set e.g. "dotnet"
+runtime  = ""         # leave empty for auto-detect, or set e.g. "dotnet", "nodejs", or "python"
 api_port = 8080
 
 [[functions]]

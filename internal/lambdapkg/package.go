@@ -53,6 +53,15 @@ func Build(runtimeName, projectRoot string, fn project.Function) (string, string
 			return "", log, err
 		}
 		return zipPath, log, nil
+	case "python":
+		log, err := packagePython(projectRoot, outDir)
+		if err != nil {
+			return "", log, err
+		}
+		if err := archiveutil.ZipDir(outDir, zipPath, nil); err != nil {
+			return "", log, err
+		}
+		return zipPath, log, nil
 	default:
 		return "", "", fmt.Errorf("automatic packaging is not implemented for runtime %q", runtimeName)
 	}
@@ -115,6 +124,58 @@ func buildNode(projectRoot string) (string, error) {
 		return "", nil
 	}
 	return run(projectRoot, "npm", "run", "build")
+}
+
+func packagePython(projectRoot, outDir string) (string, error) {
+	if err := copyDir(projectRoot, outDir, func(rel string, info os.FileInfo) bool {
+		first := strings.Split(filepath.ToSlash(rel), "/")[0]
+		name := info.Name()
+		if first == ".git" || first == ".lambit" || first == ".venv" || first == "venv" || first == ".pytest_cache" {
+			return true
+		}
+		return name == "__pycache__" || strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo")
+	}); err != nil {
+		return "", err
+	}
+	req := filepath.Join(projectRoot, "requirements.txt")
+	if _, err := os.Stat(req); err != nil {
+		return "", nil
+	}
+	return run(projectRoot, "python3", "-m", "pip", "install", "-r", req, "-t", outDir)
+}
+
+func copyDir(srcDir, dstDir string, exclude func(rel string, info os.FileInfo) bool) error {
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == srcDir {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if exclude != nil && exclude(rel, info) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dstDir, filepath.FromSlash(rel))
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
 
 func run(dir, name string, args ...string) (string, error) {

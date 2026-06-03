@@ -580,6 +580,10 @@ type clearStatusMsg struct{}
 type quickBenchResultMsg struct{ record invocationRecord } // one iteration of a quick-bench run
 type updateCheckMsg struct{ info appupdate.Info }
 type updateLaunchMsg struct{ err string }
+type configReloadMsg struct {
+	cfg *config.Config
+	err string
+}
 type cloudFunctionsMsg struct {
 	functions []awscli.Function
 	output    string
@@ -693,6 +697,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.apiServer.Stop()
 		}
 		return m, tea.Quit
+
+	case configReloadMsg:
+		if msg.err != "" {
+			if m.cloudActive {
+				m.cloudStatus = "Could not reload config: " + msg.err
+				m.cloudOutputIsErr = true
+			} else {
+				m.statusMsg = "Could not reload config: " + msg.err
+			}
+			return m, nil
+		}
+		if msg.cfg != nil {
+			m.cfg = msg.cfg
+			m.keys = resolveKeys(msg.cfg.Keybinds)
+			m.cloudProfile = msg.cfg.AWS.Profile
+			m.cloudRegion = msg.cfg.AWS.Region
+			if m.cloudRegion == "" {
+				m.cloudRegion = "us-east-1"
+			}
+		}
+		if m.cloudActive {
+			m.cloudStatus = "Config reloaded"
+			m.cloudOutputIsErr = false
+		} else {
+			m.statusMsg = "Config reloaded"
+		}
+		return m, nil
 
 	case cloudFunctionsMsg:
 		m.mode = ModeNormal
@@ -885,7 +916,7 @@ func (m *Model) toggleSelectedUpdateDetails() {
 
 func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 	if !m.isTextInputMode() && matchKey(key, m.keys.options) {
-		return m, m.openEditor(config.ConfigPath())
+		return m, m.openConfigEditor()
 	}
 
 	if m.mode == ModeError {
@@ -1122,7 +1153,7 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case matchKey(key, m.keys.options):
-		return m, m.openEditor(config.ConfigPath())
+		return m, m.openConfigEditor()
 
 	case matchKey(key, m.keys.benchmark):
 		m.benchVisible = !m.benchVisible
@@ -1358,13 +1389,25 @@ func (m Model) submitCloudInput() (tea.Model, tea.Cmd) {
 	case CloudInputProfile:
 		m.cloudProfile = val
 		m.mode = ModeNormal
-		m.cloudStatus = "AWS CLI profile set for this session"
+		if err := m.saveCloudConfig(); err != nil {
+			m.cloudStatus = "AWS CLI profile set for this session, but could not save config: " + err.Error()
+			m.cloudOutputIsErr = true
+			return m, nil
+		}
+		m.cloudStatus = "AWS CLI profile saved"
+		m.cloudOutputIsErr = false
 	case CloudInputSetupProfile:
 		if val == "" {
 			m.mode = ModeNormal
 			return m, nil
 		}
 		m.cloudProfile = val
+		if err := m.saveCloudConfig(); err != nil {
+			m.mode = ModeNormal
+			m.cloudStatus = "Could not save AWS CLI profile: " + err.Error()
+			m.cloudOutputIsErr = true
+			return m, nil
+		}
 		m.cloudStatus = "Configuring AWS SSO profile " + val
 		m.mode = ModeCloudRunning
 		m.cloudInputKind = CloudInputNone
@@ -1375,7 +1418,13 @@ func (m Model) submitCloudInput() (tea.Model, tea.Cmd) {
 		}
 		m.cloudRegion = val
 		m.mode = ModeNormal
-		m.cloudStatus = "AWS region set for this session"
+		if err := m.saveCloudConfig(); err != nil {
+			m.cloudStatus = "AWS region set for this session, but could not save config: " + err.Error()
+			m.cloudOutputIsErr = true
+			return m, nil
+		}
+		m.cloudStatus = "AWS region saved"
+		m.cloudOutputIsErr = false
 	case CloudInputDownloadBaseDir:
 		if val == "" {
 			m.mode = ModeNormal
@@ -1480,12 +1529,18 @@ func (m Model) submitCloudProfileChoice() (tea.Model, tea.Cmd) {
 	if idx < len(m.cloudProfiles) {
 		profile := m.cloudProfiles[idx]
 		m.cloudProfile = profile.Name
+		if err := m.saveCloudConfig(); err != nil {
+			m.mode = ModeNormal
+			m.cloudStatus = "Could not save AWS CLI profile: " + err.Error()
+			m.cloudOutputIsErr = true
+			return m, nil
+		}
 		if m.cloudProfileIntent == CloudProfileLogin {
 			if !profile.SSO {
 				m.mode = ModeNormal
 				m.cloudOutputIsErr = false
 				m.cloudStatus = fmt.Sprintf("%q is not an SSO profile", profile.Name)
-				m.cloudOutput = "This profile does not need aws sso login. Use it directly, or choose '+ Configure new SSO profile' to create an SSO profile."
+				m.cloudOutput = "This profile was saved. It does not need aws sso login. Use it directly, or choose '+ Configure new SSO profile' to create an SSO profile."
 				return m, nil
 			}
 			m.mode = ModeCloudRunning
@@ -1493,7 +1548,7 @@ func (m Model) submitCloudProfileChoice() (tea.Model, tea.Cmd) {
 			return m, m.cloudLoginCmd()
 		}
 		m.mode = ModeNormal
-		m.cloudStatus = "AWS CLI profile set to " + profile.Name
+		m.cloudStatus = "AWS CLI profile saved: " + profile.Name
 		m.cloudOutput = ""
 		m.cloudOutputIsErr = false
 		return m, nil
@@ -1541,6 +1596,15 @@ func (m Model) awsClient(profile, region string) awscli.Client {
 		cli = m.cfg.AWS.CLI
 	}
 	return awscli.Client{CLI: cli, Profile: profile, Region: region}
+}
+
+func (m *Model) saveCloudConfig() error {
+	if m.cfg == nil {
+		m.cfg = config.Default()
+	}
+	m.cfg.AWS.Profile = m.cloudProfile
+	m.cfg.AWS.Region = m.cloudRegion
+	return config.Save(m.cfg)
 }
 
 func (m Model) cloudLoginCmd() tea.Cmd {
@@ -2639,7 +2703,35 @@ func (m Model) toggleAPI() (tea.Model, tea.Cmd) {
 // ─── Editor ───────────────────────────────────────────────────────────────────
 
 func (m Model) openEditor(path string) tea.Cmd {
-	editor := m.cfg.Apps.Editor
+	c, err := m.editorCommand(path)
+	if err != nil {
+		return func() tea.Msg { return nil }
+	}
+	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
+}
+
+func (m Model) openConfigEditor() tea.Cmd {
+	c, err := m.editorCommand(config.ConfigPath())
+	if err != nil {
+		return func() tea.Msg { return configReloadMsg{err: err.Error()} }
+	}
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if err != nil {
+			return configReloadMsg{err: err.Error()}
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			return configReloadMsg{err: err.Error()}
+		}
+		return configReloadMsg{cfg: cfg}
+	})
+}
+
+func (m Model) editorCommand(path string) (*exec.Cmd, error) {
+	editor := ""
+	if m.cfg != nil {
+		editor = m.cfg.Apps.Editor
+	}
 	if editor == "" {
 		editor = os.Getenv("EDITOR")
 	}
@@ -2655,12 +2747,9 @@ func (m Model) openEditor(path string) tea.Cmd {
 		}
 	}
 	if editor == "" {
-		return func() tea.Msg {
-			return fmt.Sprintf("No editor found. Set $EDITOR or apps.editor in %s", config.ConfigPath())
-		}
+		return nil, fmt.Errorf("no editor found; set $EDITOR or apps.editor in %s", config.ConfigPath())
 	}
-	c := exec.Command(editor, path)
-	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
+	return exec.Command(editor, path), nil
 }
 
 func matchKey(pressed, binding string) bool { return pressed == binding }
