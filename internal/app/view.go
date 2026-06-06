@@ -39,7 +39,7 @@ func (m Model) View() string {
 		b.WriteString(m.renderUpdatePrompt())
 	case ModeUpdates:
 		b.WriteString(m.renderUpdatesScreen())
-	case ModeCloudRunning, ModeCloudChoice, ModeCloudConfirm, ModeCloudInput, ModeCloudProfile:
+	case ModeCloudRunning, ModeCloudChoice, ModeCloudConfirm, ModeCloudInput, ModeCloudProfile, ModeCloudFilter, ModeCloudRelaunch:
 		b.WriteString(m.renderMain())
 	default:
 		b.WriteString(m.renderMain())
@@ -534,18 +534,44 @@ func (m Model) renderCloudList(width, height int) []string {
 	lines = append(lines, ui.StyleSectionTitle.Render("  AWS Lambdas"))
 	lines = append(lines, ui.StyleMuted.Render("  profile: "+truncate(profile, width-13)))
 	lines = append(lines, ui.StyleMuted.Render("  region: "+truncate(m.cloudRegion, width-12)))
+	if m.mode == ModeCloudFilter {
+		lines = append(lines, ui.StyleAccent.Render("  /")+" "+m.cloudFilterInput.View())
+	} else {
+		filter := ""
+		if strings.TrimSpace(m.cloudFilterText) != "" {
+			filter = "  filter: " + truncate(m.cloudFilterText, width-28)
+		}
+		lines = append(lines, ui.StyleMuted.Render("  sort: "+m.cloudSortLabel()+filter))
+	}
 	lines = append(lines, "")
+	visible := m.visibleCloudFunctions()
 	if len(m.cloudFunctions) == 0 {
 		lines = append(lines, ui.StyleMuted.Render("  (press r to list functions)"))
+	} else if len(visible) == 0 {
+		lines = append(lines, ui.StyleMuted.Render("  (no Lambdas match filter)"))
 	} else {
-		for i, fn := range m.cloudFunctions {
+		rows := m.cloudListRows()
+		start := m.cloudListOffset
+		if start > len(visible) {
+			start = len(visible)
+		}
+		end := start + rows
+		if end > len(visible) {
+			end = len(visible)
+		}
+		for i, fn := range visible[start:end] {
+			idx := start + i
 			cursor := "  "
 			style := ui.StyleNormal
-			if i == m.cloudCursor {
+			if idx == m.cloudCursor {
 				cursor = " ▶"
 				style = ui.StyleSelected
 			}
-			lines = append(lines, cursor+" "+style.Render(truncate(fn.Name, width-4)))
+			meta := strings.TrimSpace(fn.Runtime)
+			if meta != "" {
+				meta = ui.StyleMuted.Render("  " + truncate(meta, 20))
+			}
+			lines = append(lines, cursor+" "+style.Render(truncate(fn.Name, width-lipgloss.Width(meta)-4))+meta)
 		}
 	}
 	return padLines(lines, height)
@@ -566,6 +592,14 @@ func (m Model) renderCloudDetail(width, height int) []string {
 		lines = append(lines, ui.StyleMuted.Render("  Enter to continue · Esc to cancel"))
 		return padLines(lines, height)
 	}
+	if m.mode == ModeCloudFilter {
+		lines = append(lines, ui.StyleAccent.Render("  Filter AWS Lambdas"))
+		lines = append(lines, ui.StyleMuted.Render("  Matches Lambda name, runtime, and last modified."))
+		lines = append(lines, "")
+		lines = append(lines, ui.StyleMuted.Render("  Enter keeps filter · Esc clears"))
+		lines = append(lines, ui.StyleMuted.Render("  [s] cycles sort: "+m.cloudSortLabel()))
+		return padLines(lines, height)
+	}
 	if m.mode == ModeCloudProfile {
 		return m.renderCloudProfilePicker(width, height)
 	}
@@ -574,6 +608,15 @@ func (m Model) renderCloudDetail(width, height int) []string {
 		lines = append(lines, ui.StyleMuted.Render("  [z] save zip only"))
 		lines = append(lines, ui.StyleMuted.Render("  [x] save zip and extract"))
 		lines = append(lines, ui.StyleMuted.Render("  [Esc] cancel"))
+		return padLines(lines, height)
+	}
+	if m.mode == ModeCloudRelaunch {
+		lines = append(lines, ui.StyleAccent.Render("  Download complete"))
+		lines = append(lines, "")
+		lines = append(lines, ui.StyleMuted.Render("  directory: ")+ui.StyleResult.Render(truncate(m.cloudDownloadDir, width-14)))
+		lines = append(lines, "")
+		lines = append(lines, ui.StyleAccent.Render("  Enter")+ui.StyleMuted.Render(" cd there and relaunch lambit"))
+		lines = append(lines, ui.StyleMuted.Render("  Esc stays here"))
 		return padLines(lines, height)
 	}
 	if m.mode == ModeCloudConfirm {
@@ -697,7 +740,7 @@ func cloudProfileKind(profile awscli.Profile) string {
 
 func (m Model) renderCloudStatusBar() string {
 	k := m.keys
-	row := "[" + k.cloud + "]Local  [r]Refresh  [l]SSO Login  [p]Profile  [R]Region  [m]Map  [d]Download  [u]Package+Deploy  [z]Deploy Zip  [" + k.options + "]Config  [" + k.quit + "]Quit"
+	row := "[" + k.cloud + "]Local  [r]Refresh  [/]Filter  [s]Sort " + m.cloudSortLabel() + "  [" + k.openCloud + "]Open  [l]SSO Login  [p]Profile  [R]Region  [m]Map  [d]Download  [u]Package+Deploy  [z]Deploy Zip  [" + k.options + "]Config  [" + k.quit + "]Quit"
 	if len(row) > m.width {
 		row = row[:m.width-1]
 	}

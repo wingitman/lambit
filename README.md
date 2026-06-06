@@ -186,6 +186,9 @@ Cloud actions use the AWS CLI on your `PATH`. If the AWS CLI is missing, Lambit 
 |-----|--------|
 | `l` | Pick an AWS CLI profile, then run SSO login only for SSO profiles |
 | `r` | List Lambda functions for the current profile/region |
+| `/` | Filter listed Lambda functions by name, runtime, or last modified |
+| `s` | Cycle Lambda sort mode/direction: name, runtime, last modified |
+| `w` | Open the selected Lambda in the AWS Console |
 | `p` | Pick or manually enter an AWS CLI profile and save it to config |
 | `R` | Set AWS region and save it to config |
 | `m` | Map selected AWS Lambda to the selected local function and save it in `.lambit.toml` |
@@ -197,7 +200,9 @@ Deployments always show a confirmation screen with the local function, AWS targe
 
 The profile picker lists configured AWS CLI profiles and labels them as `sso`, `non-sso`, or `static/env`. It also includes `+ Configure new SSO profile`, which launches `aws configure sso --profile <name>` interactively. Non-SSO/static profiles can still list and deploy Lambdas if their credentials work; Lambit simply avoids running `aws sso login` for them.
 
-The first time you download a Lambda, Lambit prompts for a parent download directory and stores it in `[aws].download_dir`. Each selected Lambda is downloaded into its own subdirectory under that parent, so downloads do not default into the current Lambit/project repo.
+After you have listed Lambdas, changing the profile or region automatically refreshes the list for the new AWS CLI context.
+
+The first time you download a Lambda, Lambit prompts for a parent download directory and stores it in `[aws].download_dir`. Each selected Lambda is downloaded into its own subdirectory under that parent, so downloads do not default into the current Lambit/project repo. After a successful download, Lambit asks whether to relaunch itself with that directory as the working directory.
 
 ---
 
@@ -289,9 +294,10 @@ copy         = "y"
 copy_curl    = "Y"
 goto_source  = "g"
 goto_config  = "G"
+open_cloud_lambda = "w"
 scaffold     = "s"
 options      = "o"
-cloud       = "A"
+cloud        = "A"
 show_updates = "U"
 help         = "?"
 quit         = "q"

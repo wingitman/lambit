@@ -16,7 +16,8 @@
 #>
 
 param(
-    [switch]$Update
+    [switch]$Update,
+    [switch]$BuildAll
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +28,7 @@ $InstallDir  = Join-Path $env:LOCALAPPDATA 'Programs\lambit'
 $BuildDir    = Join-Path $PSScriptRoot 'bin'
 $BinaryBuild = Join-Path $BuildDir $BinaryName
 $BinaryDest  = Join-Path $InstallDir $BinaryName
+$ReleaseBin  = Join-Path $PSScriptRoot 'releases\windows\lambit.exe'
 
 function Write-Step([string]$msg) {
     Write-Host "==> $msg" -ForegroundColor Cyan
@@ -41,33 +43,62 @@ function Write-Note([string]$msg) {
 }
 
 # ---------------------------------------------------------------------------
-# 1. Check Go is available
+# 1. Build release binaries, or obtain the install binary
 # ---------------------------------------------------------------------------
-Write-Step 'Checking for Go...'
-if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+if ($BuildAll) {
+    Write-Step 'Checking for Go (required for -BuildAll)...'
+    if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
+        Write-Host 'ERROR: Go is not installed or not on PATH.' -ForegroundColor Red
+        Write-Host 'Download Go from https://go.dev/dl/ and re-run with -BuildAll.' -ForegroundColor Red
+        exit 1
+    }
+    Write-Ok (go version)
+    $Commit = (git rev-parse HEAD 2>$null)
+    if (-not $Commit) { $Commit = 'dev' }
+    $Targets = @(
+        @{ GOOS = 'linux';   GOARCH = 'amd64'; Out = 'releases\linux\amd64\lambit' },
+        @{ GOOS = 'linux';   GOARCH = 'arm64'; Out = 'releases\linux\arm64\lambit' },
+        @{ GOOS = 'darwin';  GOARCH = 'amd64'; Out = 'releases\darwin\amd64\lambit' },
+        @{ GOOS = 'darwin';  GOARCH = 'arm64'; Out = 'releases\darwin\arm64\lambit' },
+        @{ GOOS = 'windows'; GOARCH = 'amd64'; Out = 'releases\windows\lambit.exe' }
+    )
+    foreach ($t in $Targets) {
+        Write-Step "Building $($t.GOOS)/$($t.GOARCH)..."
+        $out = Join-Path $PSScriptRoot $t.Out
+        New-Item -ItemType Directory -Path (Split-Path $out) -Force | Out-Null
+        $env:GOOS = $t.GOOS
+        $env:GOARCH = $t.GOARCH
+        & go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$Commit" -o $out .
+        if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: build failed for $($t.GOOS)/$($t.GOARCH)." -ForegroundColor Red; exit 1 }
+        Write-Ok $t.Out
+    }
+    $env:GOOS = $null
+    $env:GOARCH = $null
     Write-Host ''
-    Write-Host 'ERROR: Go is not installed or not on PATH.' -ForegroundColor Red
-    Write-Host 'Download Go from https://go.dev/dl/ and re-run this script.' -ForegroundColor Red
-    exit 1
+    Write-Host '  Pre-built binaries written to releases\' -ForegroundColor Green
+    exit 0
 }
-$goVersion = go version
-Write-Ok $goVersion
 
-# ---------------------------------------------------------------------------
-# 2. Build
-# ---------------------------------------------------------------------------
-Write-Step 'Building lambit...'
-if (-not (Test-Path $BuildDir)) {
-    New-Item -ItemType Directory -Path $BuildDir | Out-Null
+if (Get-Command go -ErrorAction SilentlyContinue) {
+    Write-Step 'Go found - building lambit from source...'
+    Write-Ok (go version)
+    if (-not (Test-Path $BuildDir)) { New-Item -ItemType Directory -Path $BuildDir | Out-Null }
+    $Commit = (git rev-parse HEAD 2>$null)
+    if (-not $Commit) { $Commit = 'dev' }
+    & go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$Commit" -o $BinaryBuild .
+    if ($LASTEXITCODE -ne 0) { Write-Host 'ERROR: go build failed.' -ForegroundColor Red; exit 1 }
+    Write-Ok "Built: $BinaryBuild"
+    $SourceBin = $BinaryBuild
+} else {
+    Write-Step 'Go not found - using pre-built binary from releases\windows\...'
+    if (-not (Test-Path $ReleaseBin)) {
+        Write-Host 'ERROR: Pre-built binary not found at releases\windows\lambit.exe' -ForegroundColor Red
+        Write-Host '       Please install Go (https://go.dev/dl/) and re-run, or ask a developer to run ".\install.ps1 -BuildAll" and commit the releases\ folder.' -ForegroundColor Red
+        exit 1
+    }
+    Write-Ok "Using: $ReleaseBin"
+    $SourceBin = $ReleaseBin
 }
-$Commit = (git rev-parse HEAD 2>$null)
-if (-not $Commit) { $Commit = 'dev' }
-& go build -ldflags="-s -w -X github.com/wingitman/lambit/internal/version.Commit=$Commit" -o $BinaryBuild .
-if ($LASTEXITCODE -ne 0) {
-    Write-Host 'ERROR: go build failed.' -ForegroundColor Red
-    exit 1
-}
-Write-Ok "Built: $BinaryBuild"
 
 # ---------------------------------------------------------------------------
 # 3. Install binary
@@ -76,7 +107,7 @@ Write-Step 'Installing binary...'
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
 }
-Copy-Item -Path $BinaryBuild -Destination $BinaryDest -Force
+Copy-Item -Path $SourceBin -Destination $BinaryDest -Force
 Write-Ok "Installed: $BinaryDest"
 
 # ---------------------------------------------------------------------------

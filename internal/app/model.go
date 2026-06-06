@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,23 +57,25 @@ func (s *apiSharedState) set(proj *project.Project, rt runtime.Runtime) {
 type Mode int
 
 const (
-	ModeNormal       Mode = iota
-	ModeInvoking          // subprocess running
-	ModeEdit              // context-sensitive text input
-	ModeNewTest           // two-step text input: name then payload
-	ModeFilter            // live filter / search
-	ModeHelp              // keybind overlay
-	ModeError             // error panel
-	ModeNoProject         // no .lambit.toml found
-	ModeBuildRunning      // build subprocess running
-	ModeQuickBench        // running N consecutive invocations for benchmarking
-	ModeUpdatePrompt      // startup update prompt
-	ModeUpdates           // update history/install screen
-	ModeCloudInput        // cloud tab text input
-	ModeCloudRunning      // cloud subprocess/network operation running
-	ModeCloudChoice       // cloud action choice screen
-	ModeCloudConfirm      // cloud destructive confirmation screen
-	ModeCloudProfile      // cloud AWS CLI profile picker
+	ModeNormal        Mode = iota
+	ModeInvoking           // subprocess running
+	ModeEdit               // context-sensitive text input
+	ModeNewTest            // two-step text input: name then payload
+	ModeFilter             // live filter / search
+	ModeHelp               // keybind overlay
+	ModeError              // error panel
+	ModeNoProject          // no .lambit.toml found
+	ModeBuildRunning       // build subprocess running
+	ModeQuickBench         // running N consecutive invocations for benchmarking
+	ModeUpdatePrompt       // startup update prompt
+	ModeUpdates            // update history/install screen
+	ModeCloudInput         // cloud tab text input
+	ModeCloudRunning       // cloud subprocess/network operation running
+	ModeCloudChoice        // cloud action choice screen
+	ModeCloudConfirm       // cloud destructive confirmation screen
+	ModeCloudProfile       // cloud AWS CLI profile picker
+	ModeCloudFilter        // cloud Lambda list filter
+	ModeCloudRelaunch      // prompt to relaunch in downloaded Lambda directory
 )
 
 type InputStep int
@@ -114,6 +118,14 @@ const (
 	CloudConfirmNone CloudConfirmKind = iota
 	CloudConfirmDeployAuto
 	CloudConfirmDeployZip
+)
+
+type CloudSortField int
+
+const (
+	CloudSortName CloudSortField = iota
+	CloudSortRuntime
+	CloudSortLastModified
 )
 
 // ─── Filter result ────────────────────────────────────────────────────────────
@@ -203,13 +215,20 @@ type Model struct {
 	cloudProfile       string
 	cloudRegion        string
 	cloudFunctions     []awscli.Function
+	cloudListLoaded    bool
 	cloudCursor        int
+	cloudListOffset    int
+	cloudFilterInput   textinput.Model
+	cloudFilterText    string
+	cloudSortField     CloudSortField
+	cloudSortDesc      bool
 	cloudProfiles      []awscli.Profile
 	cloudProfileCursor int
 	cloudProfileIntent CloudProfileIntent
 	cloudDetected      []awsmeta.Mapping
 	cloudInputKind     CloudInputKind
 	cloudPendingPath   string
+	cloudDownloadDir   string
 	cloudConfirmKind   CloudConfirmKind
 	cloudConfirmTarget string
 	cloudStatus        string
@@ -251,6 +270,7 @@ type resolvedKeys struct {
 	copyCurl    string
 	gotoSource  string
 	gotoConfig  string
+	openCloud   string
 	showUpdates string
 	cloud       string
 }
@@ -282,6 +302,7 @@ func resolveKeys(k config.Keybinds) resolvedKeys {
 		copyCurl:    k.CopyCurl,
 		gotoSource:  k.GotoSource,
 		gotoConfig:  k.GotoConfig,
+		openCloud:   k.OpenCloudLambda,
 		showUpdates: k.ShowUpdates,
 		cloud:       k.Cloud,
 	}
@@ -305,13 +326,18 @@ func New(cfg *config.Config, projectDir string) (*Model, error) {
 	fi.Placeholder = "type to search…"
 	fi.CharLimit = 80
 
+	cfi := textinput.New()
+	cfi.Placeholder = "filter by name, runtime, or last modified"
+	cfi.CharLimit = 120
+
 	m := &Model{
-		shared:      &apiSharedState{},
-		cfg:         cfg,
-		keys:        resolveKeys(cfg.Keybinds),
-		bench:       bench.New(),
-		textInput:   ti,
-		filterInput: fi,
+		shared:           &apiSharedState{},
+		cfg:              cfg,
+		keys:             resolveKeys(cfg.Keybinds),
+		bench:            bench.New(),
+		textInput:        ti,
+		filterInput:      fi,
+		cloudFilterInput: cfi,
 	}
 	if cfg != nil {
 		m.cloudProfile = cfg.AWS.Profile
@@ -594,10 +620,13 @@ type cloudProfilesMsg struct {
 	err      error
 }
 type cloudDoneMsg struct {
-	message string
-	output  string
-	err     error
+	message          string
+	output           string
+	downloadDir      string
+	refreshFunctions bool
+	err              error
 }
+type cloudRelaunchMsg struct{ err error }
 
 // ─── Update ──────────────────────────────────────────────────────────────────
 
@@ -735,7 +764,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.cloudFunctions = msg.functions
+		m.cloudListLoaded = true
 		m.clampCloudCursor()
+		m.adjustCloudListScroll()
 		m.cloudStatus = fmt.Sprintf("Loaded %d Lambda functions", len(msg.functions))
 		return m, nil
 
@@ -767,7 +798,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.cloudStatus = msg.message
+		if msg.downloadDir != "" {
+			m.cloudDownloadDir = msg.downloadDir
+			m.mode = ModeCloudRelaunch
+			return m, nil
+		}
+		if msg.refreshFunctions && m.cloudListLoaded {
+			m.mode = ModeCloudRunning
+			m.cloudStatus = msg.message + "; refreshing Lambda functions"
+			return m, m.cloudListCmd()
+		}
 		return m, nil
+
+	case cloudRelaunchMsg:
+		if msg.err != nil {
+			m.mode = ModeCloudRelaunch
+			m.cloudStatus = "Could not relaunch lambit: " + msg.err.Error()
+			m.cloudOutputIsErr = true
+			return m, nil
+		}
+		if m.apiServer != nil {
+			m.apiServer.Stop()
+		}
+		return m, tea.Quit
 
 	case tea.KeyMsg:
 		return m.handleKey(msg.String())
@@ -777,6 +830,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ModeEdit, ModeNewTest, ModeCloudInput:
 		var cmd tea.Cmd
 		m.textInput, cmd = m.textInput.Update(msg)
+		return m, cmd
+	case ModeCloudFilter:
+		var cmd tea.Cmd
+		m.cloudFilterInput, cmd = m.cloudFilterInput.Update(msg)
 		return m, cmd
 	case ModeFilter:
 		var cmd tea.Cmd
@@ -987,7 +1044,7 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if matchKey(key, m.keys.cloud) && m.mode != ModeCloudInput && m.mode != ModeCloudRunning && m.mode != ModeCloudChoice && m.mode != ModeCloudConfirm && m.mode != ModeCloudProfile {
+	if matchKey(key, m.keys.cloud) && m.mode != ModeCloudInput && m.mode != ModeCloudRunning && m.mode != ModeCloudChoice && m.mode != ModeCloudConfirm && m.mode != ModeCloudProfile && m.mode != ModeCloudFilter && m.mode != ModeCloudRelaunch {
 		m.cloudActive = !m.cloudActive
 		m.outputMode = false
 		m.mode = ModeNormal
@@ -997,7 +1054,7 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.cloudActive || m.mode == ModeCloudInput || m.mode == ModeCloudRunning || m.mode == ModeCloudChoice || m.mode == ModeCloudConfirm || m.mode == ModeCloudProfile {
+	if m.cloudActive || m.mode == ModeCloudInput || m.mode == ModeCloudRunning || m.mode == ModeCloudChoice || m.mode == ModeCloudConfirm || m.mode == ModeCloudProfile || m.mode == ModeCloudFilter || m.mode == ModeCloudRelaunch {
 		return m.handleCloudKey(key)
 	}
 
@@ -1248,7 +1305,7 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) isTextInputMode() bool {
-	return m.mode == ModeEdit || m.mode == ModeNewTest || m.mode == ModeFilter || m.mode == ModeCloudInput
+	return m.mode == ModeEdit || m.mode == ModeNewTest || m.mode == ModeFilter || m.mode == ModeCloudInput || m.mode == ModeCloudFilter
 }
 
 // ─── Cloud tab actions ───────────────────────────────────────────────────────
@@ -1287,6 +1344,17 @@ func (m Model) handleCloudKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.mode == ModeCloudRelaunch {
+		switch key {
+		case "enter":
+			return m.relaunchInDownloadedDir()
+		case "esc":
+			m.mode = ModeNormal
+			m.cloudDownloadDir = ""
+			return m, nil
+		}
+		return m, nil
+	}
 	if m.mode == ModeCloudConfirm {
 		switch key {
 		case "enter":
@@ -1296,6 +1364,36 @@ func (m Model) handleCloudKey(key string) (tea.Model, tea.Cmd) {
 			m.cloudConfirmKind = CloudConfirmNone
 			return m, nil
 		}
+		return m, nil
+	}
+	if m.mode == ModeCloudFilter {
+		switch key {
+		case "enter":
+			m.mode = ModeNormal
+			m.cloudFilterInput.Blur()
+			return m, nil
+		case "esc":
+			m.mode = ModeNormal
+			m.cloudFilterText = ""
+			m.cloudFilterInput.Reset()
+			m.cloudFilterInput.Blur()
+			m.clampCloudCursor()
+			m.adjustCloudListScroll()
+			return m, nil
+		case "backspace", "ctrl+h":
+			value := m.cloudFilterInput.Value()
+			if value != "" {
+				runes := []rune(value)
+				m.cloudFilterInput.SetValue(string(runes[:len(runes)-1]))
+			}
+		default:
+			if len([]rune(key)) == 1 {
+				m.cloudFilterInput.SetValue(m.cloudFilterInput.Value() + key)
+			}
+		}
+		m.cloudFilterText = m.cloudFilterInput.Value()
+		m.clampCloudCursor()
+		m.adjustCloudListScroll()
 		return m, nil
 	}
 	if m.mode == ModeCloudProfile {
@@ -1334,13 +1432,39 @@ func (m Model) handleCloudKey(key string) (tea.Model, tea.Cmd) {
 	case matchKey(key, m.keys.up):
 		m.cloudCursor--
 		m.clampCloudCursor()
+		m.adjustCloudListScroll()
 		return m, nil
 	case matchKey(key, m.keys.down):
 		m.cloudCursor++
 		m.clampCloudCursor()
+		m.adjustCloudListScroll()
+		return m, nil
+	case matchKey(key, m.keys.pageUp):
+		m.cloudCursor -= m.cloudListRows()
+		m.clampCloudCursor()
+		m.adjustCloudListScroll()
+		return m, nil
+	case matchKey(key, m.keys.pageDown):
+		m.cloudCursor += m.cloudListRows()
+		m.clampCloudCursor()
+		m.adjustCloudListScroll()
 		return m, nil
 	case key == "l" || key == "L":
 		return m.openCloudProfilePicker(CloudProfileLogin)
+	case matchKey(key, m.keys.filter):
+		m.cloudFilterInput.SetValue(m.cloudFilterText)
+		m.cloudFilterInput.Focus()
+		m.mode = ModeCloudFilter
+		return m, textinput.Blink
+	case key == "s" || key == "S":
+		m.cycleCloudSort()
+		m.clampCloudCursor()
+		m.adjustCloudListScroll()
+		m.cloudStatus = "Sorted AWS Lambdas by " + m.cloudSortLabel()
+		m.cloudOutputIsErr = false
+		return m, nil
+	case matchKey(key, m.keys.openCloud):
+		return m.openSelectedCloudLambda()
 	case key == "r":
 		m.mode = ModeCloudRunning
 		m.cloudStatus = "Listing Lambda functions"
@@ -1396,6 +1520,11 @@ func (m Model) submitCloudInput() (tea.Model, tea.Cmd) {
 		}
 		m.cloudStatus = "AWS CLI profile saved"
 		m.cloudOutputIsErr = false
+		if m.cloudListLoaded {
+			m.mode = ModeCloudRunning
+			m.cloudStatus = "AWS CLI profile saved; refreshing Lambda functions"
+			return m, m.cloudListCmd()
+		}
 	case CloudInputSetupProfile:
 		if val == "" {
 			m.mode = ModeNormal
@@ -1425,6 +1554,11 @@ func (m Model) submitCloudInput() (tea.Model, tea.Cmd) {
 		}
 		m.cloudStatus = "AWS region saved"
 		m.cloudOutputIsErr = false
+		if m.cloudListLoaded {
+			m.mode = ModeCloudRunning
+			m.cloudStatus = "AWS region saved; refreshing Lambda functions"
+			return m, m.cloudListCmd()
+		}
 	case CloudInputDownloadBaseDir:
 		if val == "" {
 			m.mode = ModeNormal
@@ -1487,16 +1621,141 @@ func (m Model) cloudInputTitle() string {
 }
 
 func (m *Model) clampCloudCursor() {
-	if len(m.cloudFunctions) == 0 {
+	fns := m.visibleCloudFunctions()
+	if len(fns) == 0 {
 		m.cloudCursor = 0
+		m.cloudListOffset = 0
 		return
 	}
 	if m.cloudCursor < 0 {
 		m.cloudCursor = 0
 	}
-	if m.cloudCursor >= len(m.cloudFunctions) {
-		m.cloudCursor = len(m.cloudFunctions) - 1
+	if m.cloudCursor >= len(fns) {
+		m.cloudCursor = len(fns) - 1
 	}
+}
+
+func (m *Model) visibleCloudFunctions() []awscli.Function {
+	q := strings.ToLower(strings.TrimSpace(m.cloudFilterText))
+	fns := make([]awscli.Function, 0, len(m.cloudFunctions))
+	for _, fn := range m.cloudFunctions {
+		if q == "" || strings.Contains(strings.ToLower(fn.Name), q) || strings.Contains(strings.ToLower(fn.Runtime), q) || strings.Contains(strings.ToLower(fn.LastModified), q) {
+			fns = append(fns, fn)
+		}
+	}
+	sort.SliceStable(fns, func(i, j int) bool {
+		cmp := compareCloudFunctions(fns[i], fns[j], m.cloudSortField)
+		if cmp == 0 {
+			cmp = strings.Compare(strings.ToLower(fns[i].Name), strings.ToLower(fns[j].Name))
+		}
+		if m.cloudSortDesc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+	return fns
+
+}
+
+func compareCloudFunctions(a, b awscli.Function, field CloudSortField) int {
+	switch field {
+	case CloudSortRuntime:
+		return strings.Compare(strings.ToLower(a.Runtime), strings.ToLower(b.Runtime))
+	case CloudSortLastModified:
+		at, aok := parseCloudModified(a.LastModified)
+		bt, bok := parseCloudModified(b.LastModified)
+		if aok && bok {
+			if at.Before(bt) {
+				return -1
+			}
+			if at.After(bt) {
+				return 1
+			}
+			return 0
+		}
+		return strings.Compare(a.LastModified, b.LastModified)
+	default:
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	}
+}
+
+func parseCloudModified(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05.000-0700",
+		"2006-01-02T15:04:05.000-07:00",
+		"2006-01-02T15:04:05-0700",
+		"2006-01-02T15:04:05-07:00",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func (m *Model) cloudListRows() int {
+	rows := m.leftPanelHeight() - 5
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
+func (m *Model) adjustCloudListScroll() {
+	rows := m.cloudListRows()
+	if m.cloudCursor < m.cloudListOffset {
+		m.cloudListOffset = m.cloudCursor
+	}
+	if m.cloudCursor >= m.cloudListOffset+rows {
+		m.cloudListOffset = m.cloudCursor - rows + 1
+	}
+	if m.cloudListOffset < 0 {
+		m.cloudListOffset = 0
+	}
+	maxOffset := len(m.visibleCloudFunctions()) - rows
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.cloudListOffset > maxOffset {
+		m.cloudListOffset = maxOffset
+	}
+}
+
+func (m *Model) cycleCloudSort() {
+	if !m.cloudSortDesc {
+		m.cloudSortDesc = true
+		return
+	}
+	m.cloudSortDesc = false
+	switch m.cloudSortField {
+	case CloudSortName:
+		m.cloudSortField = CloudSortRuntime
+	case CloudSortRuntime:
+		m.cloudSortField = CloudSortLastModified
+	default:
+		m.cloudSortField = CloudSortName
+	}
+}
+
+func (m Model) cloudSortLabel() string {
+	field := "Name"
+	switch m.cloudSortField {
+	case CloudSortRuntime:
+		field = "Runtime"
+	case CloudSortLastModified:
+		field = "Last Modified"
+	}
+	dir := "↑"
+	if m.cloudSortDesc {
+		dir = "↓"
+	}
+	return field + " " + dir
 }
 
 func (m *Model) clampCloudProfileCursor() {
@@ -1541,6 +1800,11 @@ func (m Model) submitCloudProfileChoice() (tea.Model, tea.Cmd) {
 				m.cloudOutputIsErr = false
 				m.cloudStatus = fmt.Sprintf("%q is not an SSO profile", profile.Name)
 				m.cloudOutput = "This profile was saved. It does not need aws sso login. Use it directly, or choose '+ Configure new SSO profile' to create an SSO profile."
+				if m.cloudListLoaded {
+					m.mode = ModeCloudRunning
+					m.cloudStatus = "AWS CLI profile saved; refreshing Lambda functions"
+					return m, m.cloudListCmd()
+				}
 				return m, nil
 			}
 			m.mode = ModeCloudRunning
@@ -1551,6 +1815,11 @@ func (m Model) submitCloudProfileChoice() (tea.Model, tea.Cmd) {
 		m.cloudStatus = "AWS CLI profile saved: " + profile.Name
 		m.cloudOutput = ""
 		m.cloudOutputIsErr = false
+		if m.cloudListLoaded {
+			m.mode = ModeCloudRunning
+			m.cloudStatus = "AWS CLI profile saved; refreshing Lambda functions"
+			return m, m.cloudListCmd()
+		}
 		return m, nil
 	}
 
@@ -1584,10 +1853,11 @@ func defaultSetupProfileName(profiles []awscli.Profile) string {
 }
 
 func (m Model) selectedCloudFunction() *awscli.Function {
-	if len(m.cloudFunctions) == 0 || m.cloudCursor < 0 || m.cloudCursor >= len(m.cloudFunctions) {
+	fns := m.visibleCloudFunctions()
+	if len(fns) == 0 || m.cloudCursor < 0 || m.cloudCursor >= len(fns) {
 		return nil
 	}
-	return &m.cloudFunctions[m.cloudCursor]
+	return &fns[m.cloudCursor]
 }
 
 func (m Model) awsClient(profile, region string) awscli.Client {
@@ -1609,9 +1879,10 @@ func (m *Model) saveCloudConfig() error {
 
 func (m Model) cloudLoginCmd() tea.Cmd {
 	client := m.awsClient(m.cloudProfile, m.cloudRegion)
+	refresh := m.cloudListLoaded
 	return func() tea.Msg {
 		out, err := client.SSOLogin(context.Background())
-		return cloudDoneMsg{message: "AWS SSO login finished for " + profileLabel(m.cloudProfile), output: out, err: simplifyAWSError(err)}
+		return cloudDoneMsg{message: "AWS SSO login finished for " + profileLabel(m.cloudProfile), output: out, refreshFunctions: refresh, err: simplifyAWSError(err)}
 	}
 }
 
@@ -1729,7 +2000,7 @@ func (m Model) runCloudDownload(extract bool) (tea.Model, tea.Cmd) {
 			}
 			message = "Downloaded and extracted to " + targetDir
 		}
-		return cloudDoneMsg{message: message, output: zipPath}
+		return cloudDoneMsg{message: message, output: zipPath, downloadDir: targetDir}
 	}
 }
 
@@ -1884,6 +2155,71 @@ func simplifyAWSError(err error) error {
 		return fmt.Errorf("AWS CLI profile not found; choose an existing profile or configure a new SSO profile")
 	}
 	return err
+}
+
+func (m Model) openSelectedCloudLambda() (tea.Model, tea.Cmd) {
+	fn := m.selectedCloudFunction()
+	if fn == nil {
+		m.cloudStatus = "Select or refresh an AWS Lambda before opening it"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	region := strings.TrimSpace(m.cloudRegion)
+	if region == "" {
+		region = "us-east-1"
+	}
+	consoleURL := fmt.Sprintf("https://%s.console.aws.amazon.com/lambda/home?region=%s#/functions/%s?tab=code", region, url.QueryEscape(region), url.PathEscape(fn.Name))
+	m.cloudStatus = "Opening " + fn.Name + " in AWS Console"
+	m.cloudOutputIsErr = false
+	return m, func() tea.Msg {
+		if err := openBrowser(consoleURL); err != nil {
+			return cloudDoneMsg{err: err}
+		}
+		return cloudDoneMsg{message: "Opened AWS Console for " + fn.Name, output: consoleURL}
+	}
+}
+
+func openBrowser(target string) error {
+	var cmd *exec.Cmd
+	switch goruntime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			cmd = exec.Command("xdg-open", target)
+		} else if _, err := exec.LookPath("gio"); err == nil {
+			cmd = exec.Command("gio", "open", target)
+		} else {
+			return fmt.Errorf("no browser opener found; tried xdg-open and gio")
+		}
+	}
+	return cmd.Start()
+}
+
+func (m Model) relaunchInDownloadedDir() (tea.Model, tea.Cmd) {
+	dir := strings.TrimSpace(m.cloudDownloadDir)
+	if dir == "" {
+		m.mode = ModeNormal
+		m.cloudStatus = "No downloaded directory to open"
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	m.mode = ModeCloudRunning
+	m.cloudStatus = "Relaunching lambit in " + dir
+	exe, err := os.Executable()
+	if err != nil {
+		m.mode = ModeCloudRelaunch
+		m.cloudStatus = "Could not relaunch lambit: " + err.Error()
+		m.cloudOutputIsErr = true
+		return m, nil
+	}
+	cmd := exec.Command(exe)
+	cmd.Dir = dir
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return cloudRelaunchMsg{err: err}
+	})
 }
 
 // ─── Cursor movement ──────────────────────────────────────────────────────────

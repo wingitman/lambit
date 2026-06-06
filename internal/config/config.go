@@ -10,33 +10,34 @@ import (
 
 // Keybinds holds all configurable key mappings.
 type Keybinds struct {
-	Up          string `toml:"up"`
-	Down        string `toml:"down"`
-	Confirm     string `toml:"confirm"`
-	Back        string `toml:"back"`
-	Options     string `toml:"options"`
-	Quit        string `toml:"quit"`
-	Invoke      string `toml:"invoke"`
-	InvokeBuild string `toml:"invoke_build"`
-	QuickBench  string `toml:"quick_bench"`
-	NewTest     string `toml:"new_test"`
-	Edit        string `toml:"edit"`
-	Delete      string `toml:"delete"`
-	ToggleAPI   string `toml:"toggle_api"`
-	Benchmark   string `toml:"benchmark"`
-	Scaffold    string `toml:"scaffold"`
-	Help        string `toml:"help"`
-	PageUp      string `toml:"page_up"`
-	PageDown    string `toml:"page_down"`
-	Tab         string `toml:"tab"`
-	ShiftTab    string `toml:"shift_tab"`
-	Filter      string `toml:"filter"`
-	Copy        string `toml:"copy"`
-	CopyCurl    string `toml:"copy_curl"`
-	GotoSource  string `toml:"goto_source"`
-	GotoConfig  string `toml:"goto_config"`
-	Cloud       string `toml:"cloud"`
-	ShowUpdates string `toml:"show_updates"`
+	Up              string `toml:"up"`
+	Down            string `toml:"down"`
+	Confirm         string `toml:"confirm"`
+	Back            string `toml:"back"`
+	Options         string `toml:"options"`
+	Quit            string `toml:"quit"`
+	Invoke          string `toml:"invoke"`
+	InvokeBuild     string `toml:"invoke_build"`
+	QuickBench      string `toml:"quick_bench"`
+	NewTest         string `toml:"new_test"`
+	Edit            string `toml:"edit"`
+	Delete          string `toml:"delete"`
+	ToggleAPI       string `toml:"toggle_api"`
+	Benchmark       string `toml:"benchmark"`
+	Scaffold        string `toml:"scaffold"`
+	Help            string `toml:"help"`
+	PageUp          string `toml:"page_up"`
+	PageDown        string `toml:"page_down"`
+	Tab             string `toml:"tab"`
+	ShiftTab        string `toml:"shift_tab"`
+	Filter          string `toml:"filter"`
+	Copy            string `toml:"copy"`
+	CopyCurl        string `toml:"copy_curl"`
+	GotoSource      string `toml:"goto_source"`
+	GotoConfig      string `toml:"goto_config"`
+	OpenCloudLambda string `toml:"open_cloud_lambda"`
+	Cloud           string `toml:"cloud"`
+	ShowUpdates     string `toml:"show_updates"`
 }
 
 // Apps holds default application overrides.
@@ -97,6 +98,7 @@ var keybindEntries = []struct{ key, comment string }{
 	{"copy_curl", "copy as curl command (using API server when running)"},
 	{"goto_source", "open handler/.cs source file in $EDITOR at the method definition"},
 	{"goto_config", "open .lambit.toml in $EDITOR at the relevant entry"},
+	{"open_cloud_lambda", "open selected AWS Lambda in the AWS Console"},
 	{"cloud", "open cloud/AWS tab"},
 	{"show_updates", "show update history and installers"},
 }
@@ -111,33 +113,34 @@ var updateEntries = []string{"disable_checks", "current_commit", "repo_path", "t
 func Default() *Config {
 	return &Config{
 		Keybinds: Keybinds{
-			Up:          "up",
-			Down:        "down",
-			Confirm:     "enter",
-			Back:        "esc",
-			Options:     "o",
-			Quit:        "q",
-			Invoke:      "i",
-			InvokeBuild: "I",
-			QuickBench:  "r",
-			NewTest:     "n",
-			Edit:        "e",
-			Delete:      "d",
-			ToggleAPI:   "a",
-			Benchmark:   "b",
-			Scaffold:    "s",
-			Help:        "?",
-			PageUp:      "pgup",
-			PageDown:    "pgdown",
-			Tab:         "tab",
-			ShiftTab:    "shift+tab",
-			Filter:      "/",
-			Copy:        "y",
-			CopyCurl:    "Y",
-			GotoSource:  "g",
-			GotoConfig:  "G",
-			Cloud:       "A",
-			ShowUpdates: "U",
+			Up:              "up",
+			Down:            "down",
+			Confirm:         "enter",
+			Back:            "esc",
+			Options:         "o",
+			Quit:            "q",
+			Invoke:          "i",
+			InvokeBuild:     "I",
+			QuickBench:      "r",
+			NewTest:         "n",
+			Edit:            "e",
+			Delete:          "d",
+			ToggleAPI:       "a",
+			Benchmark:       "b",
+			Scaffold:        "s",
+			Help:            "?",
+			PageUp:          "pgup",
+			PageDown:        "pgdown",
+			Tab:             "tab",
+			ShiftTab:        "shift+tab",
+			Filter:          "/",
+			Copy:            "y",
+			CopyCurl:        "Y",
+			GotoSource:      "g",
+			GotoConfig:      "G",
+			OpenCloudLambda: "w",
+			Cloud:           "A",
+			ShowUpdates:     "U",
 		},
 		Apps: Apps{Editor: ""},
 		AWS: AWS{
@@ -278,6 +281,9 @@ func applyKeybindDefaults(cfg *Config) {
 	if cfg.Keybinds.GotoConfig == "" {
 		cfg.Keybinds.GotoConfig = d.GotoConfig
 	}
+	if cfg.Keybinds.OpenCloudLambda == "" {
+		cfg.Keybinds.OpenCloudLambda = d.OpenCloudLambda
+	}
 	if cfg.Keybinds.Cloud == "" {
 		cfg.Keybinds.Cloud = d.Cloud
 	}
@@ -407,33 +413,34 @@ func buildTOML(cfg *Config) string {
 
 func keybindValues(k *Keybinds) map[string]string {
 	return map[string]string{
-		"up":           k.Up,
-		"down":         k.Down,
-		"confirm":      k.Confirm,
-		"back":         k.Back,
-		"quit":         k.Quit,
-		"options":      k.Options,
-		"invoke":       k.Invoke,
-		"invoke_build": k.InvokeBuild,
-		"quick_bench":  k.QuickBench,
-		"new_test":     k.NewTest,
-		"edit":         k.Edit,
-		"delete":       k.Delete,
-		"toggle_api":   k.ToggleAPI,
-		"benchmark":    k.Benchmark,
-		"scaffold":     k.Scaffold,
-		"help":         k.Help,
-		"page_up":      k.PageUp,
-		"page_down":    k.PageDown,
-		"tab":          k.Tab,
-		"shift_tab":    k.ShiftTab,
-		"filter":       k.Filter,
-		"copy":         k.Copy,
-		"copy_curl":    k.CopyCurl,
-		"goto_source":  k.GotoSource,
-		"goto_config":  k.GotoConfig,
-		"cloud":        k.Cloud,
-		"show_updates": k.ShowUpdates,
+		"up":                k.Up,
+		"down":              k.Down,
+		"confirm":           k.Confirm,
+		"back":              k.Back,
+		"quit":              k.Quit,
+		"options":           k.Options,
+		"invoke":            k.Invoke,
+		"invoke_build":      k.InvokeBuild,
+		"quick_bench":       k.QuickBench,
+		"new_test":          k.NewTest,
+		"edit":              k.Edit,
+		"delete":            k.Delete,
+		"toggle_api":        k.ToggleAPI,
+		"benchmark":         k.Benchmark,
+		"scaffold":          k.Scaffold,
+		"help":              k.Help,
+		"page_up":           k.PageUp,
+		"page_down":         k.PageDown,
+		"tab":               k.Tab,
+		"shift_tab":         k.ShiftTab,
+		"filter":            k.Filter,
+		"copy":              k.Copy,
+		"copy_curl":         k.CopyCurl,
+		"goto_source":       k.GotoSource,
+		"goto_config":       k.GotoConfig,
+		"open_cloud_lambda": k.OpenCloudLambda,
+		"cloud":             k.Cloud,
+		"show_updates":      k.ShowUpdates,
 	}
 }
 
